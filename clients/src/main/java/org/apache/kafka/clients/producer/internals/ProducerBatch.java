@@ -142,9 +142,12 @@ public final class ProducerBatch {
      * @return The RecordSend corresponding to this record or null if there isn't sufficient room.
      */
     public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers, Callback callback, long now) {
+        //1.1 检查MemoryRecordsBuilder是否还有足够空间用于写入
         if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
+            //没有空间写入直接return null
             return null;
         } else {
+            //1.2 调用append()方法写入消息，更新对应字段并return future
             this.recordsBuilder.append(timestamp, key, value, headers);
             this.maxRecordSize = Math.max(this.maxRecordSize, AbstractRecords.estimateSizeInBytesUpperBound(magic(),
                     recordsBuilder.compression().type(), key, value, headers));

@@ -294,6 +294,8 @@ public class RecordAccumulator {
                                      boolean abortOnNewBatch,
                                      long nowMs,
                                      Cluster cluster) throws InterruptedException {
+
+        // 1.1 获取对应的topicInfo
         TopicInfo topicInfo = topicInfoMap.computeIfAbsent(topic, k -> new TopicInfo(createBuiltInPartitioner(logContext, k, batchSize)));
 
         // We keep track of the number of appending thread to make sure we do not miss batches in
@@ -302,12 +304,9 @@ public class RecordAccumulator {
         ByteBuffer buffer = null;
         if (headers == null) headers = Record.EMPTY_HEADERS;
         try {
-            // Loop to retry in case we encounter partitioner's race conditions.
+            // 2. while循环处理并发竟态情况
             while (true) {
-                // If the message doesn't have any partition affinity, so we pick a partition based on the broker
-                // availability and performance.  Note, that here we peek current partition before we hold the
-                // deque lock, so we'll need to make sure that it's not changed while we were waiting for the
-                // deque lock.
+                // 2.1 partition取值兜底
                 final BuiltInPartitioner.StickyPartitionInfo partitionInfo;
                 final int effectivePartition;
                 if (partition == RecordMetadata.UNKNOWN_PARTITION) {
@@ -318,17 +317,20 @@ public class RecordAccumulator {
                     effectivePartition = partition;
                 }
 
-                // Now that we know the effective partition, let the caller know.
+                // 2.2 更新callback中的partition
                 setPartition(callbacks, effectivePartition);
 
-                // check if we have an in-progress batch
+                // 2.3 获取当前分区的deque
                 Deque<ProducerBatch> dq = topicInfo.batches.computeIfAbsent(effectivePartition, k -> new ArrayDeque<>());
                 synchronized (dq) {
-                    // After taking the lock, validate that the partition hasn't changed and retry.
+                    // 2.4 check partition是否发生变化
                     if (partitionChanged(topic, topicInfo, partitionInfo, dq, nowMs, cluster))
                         continue;
 
+                    // 2.5 调用tryAppend进行写入
                     RecordAppendResult appendResult = tryAppend(timestamp, key, value, headers, callbacks, dq, nowMs);
+
+                    // 2.5.1 写入后result不为空，更新分区信息，细节见updatePartitionInfo
                     if (appendResult != null) {
                         // If queue has incomplete batches we disable switch (see comments in updatePartitionInfo).
                         boolean enableSwitch = allBatchesFull(dq);
@@ -337,12 +339,13 @@ public class RecordAccumulator {
                     }
                 }
 
-                // we don't have an in-progress record batch try to allocate a new batch
+                // 2.6 传入abortOnNewBatch为true，直接返回空batch，再次执行append进行写入
                 if (abortOnNewBatch) {
                     // Return a result that will cause another call to append.
                     return new RecordAppendResult(null, false, false, true, 0);
                 }
 
+                //2.8 buffer为空 分配空间并更新timestamp
                 if (buffer == null) {
                     byte maxUsableMagic = apiVersions.maxUsableProduceMagic();
                     int size = Math.max(this.batchSize, AbstractRecords.estimateSizeInBytesUpperBound(maxUsableMagic, compression.type(), key, value, headers));
@@ -360,6 +363,7 @@ public class RecordAccumulator {
                     if (partitionChanged(topic, topicInfo, partitionInfo, dq, nowMs, cluster))
                         continue;
 
+                    //2.9 将新batch加到deque，将消息加到新batch
                     RecordAppendResult appendResult = appendNewBatch(topic, effectivePartition, dq, timestamp, key, value, headers, callbacks, buffer, nowMs);
                     // Set buffer to null, so that deallocate doesn't return it back to free pool, since it's used in the batch.
                     if (appendResult.newBatchCreated)

@@ -35,18 +35,38 @@ import java.util.Set;
 public final class Cluster {
 
     private final boolean isBootstrapConfigured;
+    //集群全部节点信息
     private final List<Node> nodes;
+
+    //各种类型的topic分类信息
     private final Set<String> unauthorizedTopics;
     private final Set<String> invalidTopics;
     private final Set<String> internalTopics;
+
+    //当前controller节点
     private final Node controller;
+
+    //分区到分区信息的映射
     private final Map<TopicPartition, PartitionInfo> partitionsByTopicPartition;
+
+    //topic到分区信息的映射
     private final Map<String, List<PartitionInfo>> partitionsByTopic;
+    //topic到可用分区信息的映射
     private final Map<String, List<PartitionInfo>> availablePartitionsByTopic;
+
+    //nodeId到分区信息的映射
     private final Map<Integer, List<PartitionInfo>> partitionsByNode;
+
+    //nodeId到Node的映射
     private final Map<Integer, Node> nodesById;
+
+    //cluster元信息，目前仅有clusterId字段
     private final ClusterResource clusterResource;
+
+    //topic到唯一标识的映射
     private final Map<String, Uuid> topicIds;
+
+    //唯一标识到topic名称的标识
     private final Map<Uuid, String> topicNames;
 
     /**

@@ -351,6 +351,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                   ProducerInterceptors<K, V> interceptors,
                   Time time) {
         try {
+
+            //1.1 配置对象属性
             this.producerConfig = config;
             this.time = time;
 
@@ -366,6 +368,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             log = logContext.logger(KafkaProducer.class);
             log.trace("Starting the Kafka producer");
 
+            //1.2 配置metric
             Map<String, String> metricTags = Collections.singletonMap("client-id", clientId);
             MetricConfig metricConfig = new MetricConfig().samples(config.getInt(ProducerConfig.METRICS_NUM_SAMPLES_CONFIG))
                     .timeWindow(config.getLong(ProducerConfig.METRICS_SAMPLE_WINDOW_MS_CONFIG), TimeUnit.MILLISECONDS)
@@ -378,6 +381,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                     config.originalsWithPrefix(CommonClientConfigs.METRICS_CONTEXT_PREFIX));
             this.metrics = new Metrics(metricConfig, reporters, time, metricsContext);
             this.producerMetrics = new KafkaProducerMetrics(metrics);
+
+            //1.3 配置partitioner
             this.partitioner = config.getConfiguredInstance(
                     ProducerConfig.PARTITIONER_CLASS_CONFIG,
                     Partitioner.class,
@@ -386,6 +391,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             this.partitionerIgnoreKeys = config.getBoolean(ProducerConfig.PARTITIONER_IGNORE_KEYS_CONFIG);
             long retryBackoffMs = config.getLong(ProducerConfig.RETRY_BACKOFF_MS_CONFIG);
             long retryBackoffMaxMs = config.getLong(ProducerConfig.RETRY_BACKOFF_MAX_MS_CONFIG);
+
+            //1.4 配置serializer
             if (keySerializer == null) {
                 this.keySerializer = config.getConfiguredInstance(ProducerConfig.KEY_SERIALIZER_CLASS_CONFIG,
                                                                                          Serializer.class);
@@ -403,6 +410,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 this.valueSerializer = valueSerializer;
             }
 
+            //1.5 配置interceptor
             List<ProducerInterceptor<K, V>> interceptorList = ClientUtils.configuredInterceptors(config,
                     ProducerConfig.INTERCEPTOR_CLASSES_CONFIG,
                     ProducerInterceptor.class);
@@ -988,7 +996,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
      */
     @Override
     public Future<RecordMetadata> send(ProducerRecord<K, V> record, Callback callback) {
-        // intercept the record, which can be potentially modified; this method does not throw exceptions
+        // 拦截器前置send动作
         ProducerRecord<K, V> interceptedRecord = this.interceptors.onSend(record);
         return doSend(interceptedRecord, callback);
     }
@@ -1013,16 +1021,17 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
      * Implementation of asynchronously send a record to a topic.
      */
     private Future<RecordMetadata> doSend(ProducerRecord<K, V> record, Callback callback) {
-        // Append callback takes care of the following:
-        //  - call interceptors and user callback on completion
-        //  - remember partition that is calculated in RecordAccumulator.append
+        // 1.1 创建callback对象
         AppendCallbacks appendCallbacks = new AppendCallbacks(callback, this.interceptors, record);
 
         try {
+            //1.2 检查producer是否被close
             throwIfProducerClosed();
             // first make sure the metadata for the topic is available
             long nowMs = time.milliseconds();
             ClusterAndWaitTime clusterAndWaitTime;
+
+            //1.3 拉取指定topic、分区的元数据，和等待时间
             try {
                 clusterAndWaitTime = waitOnMetadata(record.topic(), record.partition(), nowMs, maxBlockTimeMs);
             } catch (KafkaException e) {
@@ -1033,6 +1042,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
             nowMs += clusterAndWaitTime.waitedOnMetadataMs;
             long remainingWaitMs = Math.max(0, maxBlockTimeMs - clusterAndWaitTime.waitedOnMetadataMs);
             Cluster cluster = clusterAndWaitTime.cluster;
+
+            //1.4 key value进行序列化
             byte[] serializedKey;
             try {
                 serializedKey = keySerializer.serialize(record.topic(), record.headers(), record.key());
@@ -1050,28 +1061,28 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                         " specified in value.serializer", cce);
             }
 
-            // Try to calculate partition, but note that after this call it can be RecordMetadata.UNKNOWN_PARTITION,
-            // which means that the RecordAccumulator would pick a partition using built-in logic (which may
-            // take into account broker load, the amount of data produced to each partition, etc.).
+            // 1.5 计算当前消息所属的partition
             int partition = partition(record, serializedKey, serializedValue, cluster);
 
+            // 1.6 设置消息header为readOnly
             setReadOnly(record.headers());
             Header[] headers = record.headers().toArray();
 
+            //1.7 检查消息大小是否符合
             int serializedSize = AbstractRecords.estimateSizeInBytesUpperBound(apiVersions.maxUsableProduceMagic(),
                     compression.type(), serializedKey, serializedValue, headers);
             ensureValidRecordSize(serializedSize);
             long timestamp = record.timestamp() == null ? nowMs : record.timestamp();
 
-            // A custom partitioner may take advantage on the onNewBatch callback.
+            // 自定义partitioner
             boolean abortOnNewBatch = partitioner != null;
 
-            // Append the record to the accumulator.  Note, that the actual partition may be
-            // calculated there and can be accessed via appendCallbacks.topicPartition.
+            // 1.8 将消息追加到accumulator中
             RecordAccumulator.RecordAppendResult result = accumulator.append(record.topic(), partition, timestamp, serializedKey,
                     serializedValue, headers, appendCallbacks, remainingWaitMs, abortOnNewBatch, nowMs, cluster);
             assert appendCallbacks.getPartition() != RecordMetadata.UNKNOWN_PARTITION;
 
+            // 1.9 消息入新batch的情况
             if (result.abortForNewBatch) {
                 int prevPartition = partition;
                 onNewBatch(record.topic(), cluster, prevPartition);
@@ -1083,15 +1094,12 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                     serializedValue, headers, appendCallbacks, remainingWaitMs, false, nowMs, cluster);
             }
 
-            // Add the partition to the transaction (if in progress) after it has been successfully
-            // appended to the accumulator. We cannot do it before because the partition may be
-            // unknown or the initially selected partition may be changed when the batch is closed
-            // (as indicated by `abortForNewBatch`). Note that the `Sender` will refuse to dequeue
-            // batches from the accumulator until they have been added to the transaction.
+            // 2.1 开启事务的情况
             if (transactionManager != null) {
                 transactionManager.maybeAddPartition(appendCallbacks.topicPartition());
             }
 
+            // 2.2 如果batch满了，或者新batch被创建，唤醒后台sender线程
             if (result.batchIsFull || result.newBatchCreated) {
                 log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), appendCallbacks.getPartition());
                 this.sender.wakeup();
@@ -1147,15 +1155,17 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
     private ClusterAndWaitTime waitOnMetadata(String topic, Integer partition, long nowMs, long maxWaitMs) throws InterruptedException {
         Cluster cluster = metadata.fetch();
 
+        //1.1 check topic是否有效
         if (cluster.invalidTopics().contains(topic))
             throw new InvalidTopicException(topic);
 
-        // add topic to metadata topic list if it is not there already and reset expiry
+        // 1，2 更新topic有效时间
         metadata.add(topic, nowMs);
 
+        //1.3 获取当前topic分区数量
         Integer partitionsCount = cluster.partitionCountForTopic(topic);
-        // Return cached metadata if we have it, and if the record's partition is either undefined
-        // or within the known partition range
+
+        //1.4 若分区数量合理，直接返回集群信息
         if (partitionsCount != null && (partition == null || partition < partitionsCount))
             return new ClusterAndWaitTime(cluster, 0);
 
@@ -1165,15 +1175,22 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
         // or until maxWaitTimeMs is exceeded. This is necessary in case the metadata
         // is stale and the number of partitions for this topic has increased in the meantime.
         long nowNanos = time.nanoseconds();
+
+        //2.1 通过while循环，等待获取正确的partitionCount
         do {
             if (partition != null) {
                 log.trace("Requesting metadata update for partition {} of topic {}.", partition, topic);
             } else {
                 log.trace("Requesting metadata update for topic {}.", topic);
             }
+            //2.2 更新topic的expiry time
             metadata.add(topic, nowMs + elapsed);
+
+            //2.3 获取topic最新version，并唤醒sender线程
             int version = metadata.requestUpdateForTopic(topic);
             sender.wakeup();
+
+            //等待version更新
             try {
                 metadata.awaitUpdate(version, remainingWaitMs);
             } catch (TimeoutException ex) {
