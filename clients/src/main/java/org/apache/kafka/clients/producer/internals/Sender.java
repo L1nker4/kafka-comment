@@ -365,10 +365,10 @@ public class Sender implements Runnable {
 
     private long sendProducerData(long now) {
         MetadataSnapshot metadataSnapshot = metadata.fetchMetadataSnapshot();
-        // get the list of partitions with data ready to send
+        // 1.1 查询accumulator的ready()方法，获取当前已经满足发送要求的node（只需要有一个batch满足发送要求）
         RecordAccumulator.ReadyCheckResult result = this.accumulator.ready(metadataSnapshot, now);
 
-        // if there are any partitions whose leaders are not known yet, force metadata update
+        // 1.2 如果metadata中有topic的partition leader未知，先更新metadata
         if (!result.unknownLeaderTopics.isEmpty()) {
             // The set of topics with unknown leader contains topics with leader election pending as well as
             // topics which may have expired. Add the topic again to metadata to ensure it is included
@@ -381,11 +381,12 @@ public class Sender implements Runnable {
             this.metadata.requestUpdate(false);
         }
 
-        // remove any nodes we aren't ready to send to
+        // 1.3 删除暂未connection ready的node
         Iterator<Node> iter = result.readyNodes.iterator();
         long notReadyTimeout = Long.MAX_VALUE;
         while (iter.hasNext()) {
             Node node = iter.next();
+            //1.4 更新readyTimeMs
             if (!this.client.ready(node, now)) {
                 // Update just the readyTimeMs of the latency stats, so that it moves forward
                 // every time the batch is ready (then the difference between readyTimeMs and
@@ -400,9 +401,13 @@ public class Sender implements Runnable {
             }
         }
 
-        // create produce requests
+        // 2.1 调用drain()，获取nodeId -> 待发送的ProducerBatch集合映射
         Map<Integer, List<ProducerBatch>> batches = this.accumulator.drain(metadataSnapshot, result.readyNodes, this.maxRequestSize, now);
+
+        //2.2 调用addToInflightBatches()，将待发送的ProducerBatch集合映射添加到inFlightBatches中，这个集合记录了已经发送但未响应的ProducerBatch
         addToInflightBatches(batches);
+
+        //2.3 如果guaranteeMessageOrder为true，将batch添加到muted
         if (guaranteeMessageOrder) {
             // Mute all the partitions drained
             for (List<ProducerBatch> batchList : batches.values()) {
@@ -411,14 +416,15 @@ public class Sender implements Runnable {
             }
         }
 
+        //2.4 重置batch到期时间
         accumulator.resetNextBatchExpiryTime();
+
+        //2.5 获取过期的batch
         List<ProducerBatch> expiredInflightBatches = getExpiredInflightBatches(now);
         List<ProducerBatch> expiredBatches = this.accumulator.expiredBatches(now);
         expiredBatches.addAll(expiredInflightBatches);
 
-        // Reset the producer id if an expired batch has previously been sent to the broker. Also update the metrics
-        // for expired batches. see the documentation of @TransactionState.resetIdempotentProducerId to understand why
-        // we need to reset the producer id here.
+        //2.6 循环调用failBatch()方法来处理过期的batch，内部调用ProducerBatch.done()
         if (!expiredBatches.isEmpty())
             log.trace("Expired {} batches in accumulator", expiredBatches.size());
         for (ProducerBatch expiredBatch : expiredBatches) {
@@ -430,13 +436,11 @@ public class Sender implements Runnable {
                 transactionManager.markSequenceUnresolved(expiredBatch);
             }
         }
+
+        //2.7 更新metric
         sensors.updateProduceRequestMetrics(batches);
 
-        // If we have any nodes that are ready to send + have sendable data, poll with 0 timeout so this can immediately
-        // loop and try sending more data. Otherwise, the timeout will be the smaller value between next batch expiry
-        // time, and the delay time for checking data availability. Note that the nodes may have data that isn't yet
-        // sendable due to lingering, backing off, etc. This specifically does not include nodes with sendable data
-        // that aren't ready to send since they would cause busy looping.
+        //2.8 计算pollTimeout
         long pollTimeout = Math.min(result.nextReadyCheckDelayMs, notReadyTimeout);
         pollTimeout = Math.min(pollTimeout, this.accumulator.nextExpiryTimeMs() - now);
         pollTimeout = Math.max(pollTimeout, 0);
@@ -448,6 +452,7 @@ public class Sender implements Runnable {
             // otherwise the select time will be the time difference between now and the metadata expiry time;
             pollTimeout = 0;
         }
+        //2.9 调用sendProduceRequests()按Node分组发送请求
         sendProduceRequests(batches, now);
         return pollTimeout;
     }

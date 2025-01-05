@@ -455,22 +455,27 @@ public class MemoryRecordsBuilder implements AutoCloseable {
     private void appendWithOffset(long offset, boolean isControlRecord, long timestamp, ByteBuffer key,
                                   ByteBuffer value, Header[] headers) {
         try {
+            //1. 检查isControl标志是否一致
             if (isControlRecord != isControlBatch)
                 throw new IllegalArgumentException("Control records can only be appended to control batches");
 
+            // 2. 检查offset递增
             if (lastOffset != null && offset <= lastOffset)
                 throw new IllegalArgumentException(String.format("Illegal offset %d following previous offset %d " +
                         "(Offsets must increase monotonically).", offset, lastOffset));
 
+            //3. 检查时间戳
             if (timestamp < 0 && timestamp != RecordBatch.NO_TIMESTAMP)
                 throw new IllegalArgumentException("Invalid negative timestamp " + timestamp);
 
+            //4. 只有V2版本消息，才有header
             if (magic < RecordBatch.MAGIC_VALUE_V2 && headers != null && headers.length > 0)
                 throw new IllegalArgumentException("Magic v" + magic + " does not support record headers");
 
             if (baseTimestamp == null)
                 baseTimestamp = timestamp;
 
+            //5. 写入
             if (magic > RecordBatch.MAGIC_VALUE_V1) {
                 appendDefaultRecord(offset, timestamp, key, value, headers);
             } else {
@@ -757,10 +762,15 @@ public class MemoryRecordsBuilder implements AutoCloseable {
 
     private void appendDefaultRecord(long offset, long timestamp, ByteBuffer key, ByteBuffer value,
                                      Header[] headers) throws IOException {
+        //1. 检查appendStream状态
         ensureOpenForRecordAppend();
+        //2. 计算各个变量值
         int offsetDelta = (int) (offset - baseOffset);
         long timestampDelta = timestamp - baseTimestamp;
+
+        //3. 调用DefaultRecord工具类的writeTo方法，将消息写入appendStream流
         int sizeInBytes = DefaultRecord.writeTo(appendStream, offsetDelta, timestampDelta, key, value, headers);
+        //更新元信息
         recordWritten(offset, timestamp, sizeInBytes);
     }
 

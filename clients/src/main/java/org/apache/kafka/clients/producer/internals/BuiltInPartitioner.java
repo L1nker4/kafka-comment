@@ -70,6 +70,7 @@ public class BuiltInPartitioner {
         PartitionLoadStats partitionLoadStats = this.partitionLoadStats;
         int partition;
 
+        //分区负载信息为空，则随机选择分区
         if (partitionLoadStats == null) {
             // We don't have stats to do adaptive partitioning (or it's disabled), just switch to the next
             // partition based on uniform distribution.
@@ -82,6 +83,8 @@ public class BuiltInPartitioner {
                 partition = random % partitions.size();
             }
         } else {
+            //如果有负载信息，则根据负载分布选择分区
+
             // Calculate next partition based on load distribution.
             // Note that partitions without leader are excluded from the partitionLoadStats.
             assert partitionLoadStats.length > 0;

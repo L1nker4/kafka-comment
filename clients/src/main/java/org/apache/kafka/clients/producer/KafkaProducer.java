@@ -1099,7 +1099,7 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
                 transactionManager.maybeAddPartition(appendCallbacks.topicPartition());
             }
 
-            // 2.2 如果batch满了，或者新batch被创建，唤醒后台sender线程
+            // 2.2 如果batch满了，或者新batch被创建，唤醒后台sender线程进行发送
             if (result.batchIsFull || result.newBatchCreated) {
                 log.trace("Waking up the sender since topic {} partition {} is either full or getting a new batch", record.topic(), appendCallbacks.getPartition());
                 this.sender.wakeup();

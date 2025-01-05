@@ -243,6 +243,7 @@ public class RecordAccumulator {
                                      BuiltInPartitioner.StickyPartitionInfo partitionInfo,
                                      Deque<ProducerBatch> deque, long nowMs,
                                      Cluster cluster) {
+        //1.1 检查粘性分区是否被并发修改
         if (topicInfo.builtInPartitioner.isPartitionChanged(partitionInfo)) {
             log.trace("Partition {} for topic {} switched by a concurrent append, retrying",
                     partitionInfo.partition(), topic);
@@ -310,6 +311,7 @@ public class RecordAccumulator {
                 final BuiltInPartitioner.StickyPartitionInfo partitionInfo;
                 final int effectivePartition;
                 if (partition == RecordMetadata.UNKNOWN_PARTITION) {
+                    //2.1.1 若未指定分区，使用粘性分区（默认0）
                     partitionInfo = topicInfo.builtInPartitioner.peekCurrentPartitionInfo(cluster);
                     effectivePartition = partitionInfo.partition();
                 } else {
@@ -358,12 +360,13 @@ public class RecordAccumulator {
                     nowMs = time.milliseconds();
                 }
 
+                //3. 如果上轮deque为空，且abortOnNewBatch=false，则尝试重新将消息写入新batch
                 synchronized (dq) {
                     // After taking the lock, validate that the partition hasn't changed and retry.
                     if (partitionChanged(topic, topicInfo, partitionInfo, dq, nowMs, cluster))
                         continue;
 
-                    //2.9 将新batch加到deque，将消息加到新batch
+                    //3.1 将新batch加到deque，将消息加到新batch
                     RecordAppendResult appendResult = appendNewBatch(topic, effectivePartition, dq, timestamp, key, value, headers, callbacks, buffer, nowMs);
                     // Set buffer to null, so that deallocate doesn't return it back to free pool, since it's used in the batch.
                     if (appendResult.newBatchCreated)
@@ -375,6 +378,7 @@ public class RecordAccumulator {
                 }
             }
         } finally {
+            //4. 释放buffer，并且减少appendsInProgress
             free.deallocate(buffer);
             appendsInProgress.decrementAndGet();
         }
@@ -452,17 +456,24 @@ public class RecordAccumulator {
                                          Callback callback, Deque<ProducerBatch> deque, long nowMs) {
         if (closed)
             throw new KafkaException("Producer closed while send in progress");
+        //1. 获取deque最后一个batch
         ProducerBatch last = deque.peekLast();
         if (last != null) {
+            //2. 获取当前batch的size
             int initialBytes = last.estimatedSizeInBytes();
+            //3. 尝试将消息加到batch
             FutureRecordMetadata future = last.tryAppend(timestamp, key, value, headers, callback, nowMs);
+
+            //4. 如果batch已满，关闭batch，返回null
             if (future == null) {
                 last.closeForRecordAppends();
             } else {
+                //5. 计算写入的消息大小，并返回RecordAppendResult
                 int appendedBytes = last.estimatedSizeInBytes() - initialBytes;
                 return new RecordAppendResult(future, deque.size() > 1 || last.isFull(), false, false, appendedBytes);
             }
         }
+        //deque 为空，return null
         return null;
     }
 

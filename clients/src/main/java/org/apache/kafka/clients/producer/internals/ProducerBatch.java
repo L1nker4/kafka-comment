@@ -144,18 +144,19 @@ public final class ProducerBatch {
     public FutureRecordMetadata tryAppend(long timestamp, byte[] key, byte[] value, Header[] headers, Callback callback, long now) {
         //1.1 检查MemoryRecordsBuilder是否还有足够空间用于写入
         if (!recordsBuilder.hasRoomFor(timestamp, key, value, headers)) {
-            //没有空间写入直接return null
+            //1.1.1 没有空间写入直接return null
             return null;
         } else {
             //1.2 调用append()方法写入消息，更新对应字段并return future
             this.recordsBuilder.append(timestamp, key, value, headers);
             this.maxRecordSize = Math.max(this.maxRecordSize, AbstractRecords.estimateSizeInBytesUpperBound(magic(),
-                    recordsBuilder.compression().type(), key, value, headers));
+                            recordsBuilder.compression().type(), key, value, headers));
             this.lastAppendTime = now;
+            //1.3 创建返回值
             FutureRecordMetadata future = new FutureRecordMetadata(this.produceFuture, this.recordCount,
-                                                                   timestamp,
-                                                                   key == null ? -1 : key.length,
-                                                                   value == null ? -1 : value.length,
+                    timestamp,
+                    key == null ? -1 : key.length,
+                    value == null ? -1 : value.length,
                                                                    Time.SYSTEM);
             // we have to keep every future returned to the users in case the batch needs to be
             // split to several new batches and resent.
@@ -284,7 +285,7 @@ public final class ProducerBatch {
                     tryFinalState, topicPartition, baseOffset, this.finalState.get());
             } else {
                 // FAILED --> FAILED and ABORTED --> FAILED transitions are ignored.
-                log.debug("Ignored state transition {} -> {} for {} batch with base offset {}",
+                log.debug("Ignored st  ate transition {} -> {} for {} batch with base offset {}",
                     this.finalState.get(), tryFinalState, topicPartition, baseOffset);
             }
         } else {
