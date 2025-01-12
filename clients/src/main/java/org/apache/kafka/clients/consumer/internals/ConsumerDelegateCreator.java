@@ -57,6 +57,7 @@ public class ConsumerDelegateCreator {
                                                 Deserializer<K> keyDeserializer,
                                                 Deserializer<V> valueDeserializer) {
         try {
+            //根据配置选取对应的实现类
             GroupProtocol groupProtocol = GroupProtocol.valueOf(config.getString(ConsumerConfig.GROUP_PROTOCOL_CONFIG).toUpperCase(Locale.ROOT));
 
             if (groupProtocol == GroupProtocol.CONSUMER)

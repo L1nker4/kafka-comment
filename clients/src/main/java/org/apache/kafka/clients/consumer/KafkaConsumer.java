@@ -523,8 +523,10 @@ import static org.apache.kafka.common.utils.Utils.propsToMap;
  */
 public class KafkaConsumer<K, V> implements Consumer<K, V> {
 
+    //用于创建delegate的工厂类
     private static final ConsumerDelegateCreator CREATOR = new ConsumerDelegateCreator();
 
+    //consumer具体的实现类
     private final ConsumerDelegate<K, V> delegate;
 
     /**

@@ -223,7 +223,7 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
     }
 
     /**
-     * Process event that indicates that the subscription changed. This will make the
+     * Process event trhat indicates that the subsciption changed. This will make the
      * consumer join the group if it is not part of it yet, or send the updated subscription if
      * it is already a member.
      */

@@ -76,7 +76,7 @@ public class FetchCollector<K, V> {
         this.time = time;
     }
 
-    /**
+     /**
      * Return the fetched {@link ConsumerRecord records}, empty the {@link FetchBuffer record buffer}, and
      * update the consumed position.
      *
@@ -98,14 +98,19 @@ public class FetchCollector<K, V> {
 
         try {
             while (recordsRemaining > 0) {
+                //1.1 从fetchBuffer获取CompletedFetch
                 final CompletedFetch nextInLineFetch = fetchBuffer.nextInLineFetch();
 
+                //1.2 若nextInLineFetch()返回null或已被消费，从queue中获取
                 if (nextInLineFetch == null || nextInLineFetch.isConsumed()) {
                     final CompletedFetch completedFetch = fetchBuffer.peek();
 
+                    //1.3 此时为空，说明broker暂无消息响应
                     if (completedFetch == null)
                         break;
 
+
+                    //1.4 初始化CompletedFetch
                     if (!completedFetch.isInitialized()) {
                         try {
                             fetchBuffer.setNextInLineFetch(initialize(completedFetch));
@@ -125,6 +130,7 @@ public class FetchCollector<K, V> {
                     }
 
                     fetchBuffer.poll();
+                    //1.5 检查当前topic partition是否被暂停消费
                 } else if (subscriptions.isPaused(nextInLineFetch.partition)) {
                     // when the partition is paused we add the records back to the completedFetches queue instead of draining
                     // them so that they can be returned on a subsequent poll if the partition is resumed at that time
@@ -132,6 +138,7 @@ public class FetchCollector<K, V> {
                     pausedCompletedFetches.add(nextInLineFetch);
                     fetchBuffer.setNextInLineFetch(null);
                 } else {
+                    //1.6 从CompletedFetch中获取Fetch
                     final Fetch<K, V> nextFetch = fetchRecords(nextInLineFetch, recordsRemaining);
                     recordsRemaining -= nextFetch.numRecords();
                     fetch.add(nextFetch);

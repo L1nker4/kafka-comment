@@ -675,17 +675,20 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     public ConsumerRecords<K, V> poll(final Duration timeout) {
         Timer timer = time.timer(timeout);
 
+        //1.1 获取lock并确保consumer未关闭
         acquireAndEnsureOpen();
         try {
+            //1.2 更新consumer监控指标
             kafkaConsumerMetrics.recordPollStart(timer.currentTimeMs());
 
+            //1.3 确保已订阅topic
             if (subscriptions.hasNoSubscriptionOrUserAssignment()) {
                 throw new IllegalStateException("Consumer is not subscribed to any topics or assigned any partitions");
             }
 
+            //1.4 定时处理poll逻辑
             do {
-
-                // Make sure to let the background thread know that we are still polling.
+                // 1.5 向handler发送PollEvent
                 applicationEventHandler.add(new PollEvent(timer.currentTimeMs()));
 
                 // We must not allow wake-ups between polling for fetches and returning the records.
@@ -694,6 +697,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                 // returning the records in the fetches. Thus, we trigger a possible wake-up before we poll fetches.
                 wakeupTrigger.maybeTriggerWakeup();
 
+                //1.6 更新metadata，并唤醒network thread处理poll任务，获取数据
                 updateAssignmentMetadataIfNeeded(timer);
                 final Fetch<K, V> fetch = pollForFetches(timer);
                 if (!fetch.isEmpty()) {
@@ -701,7 +705,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                         log.trace("Returning empty records from `poll()` "
                             + "since the consumer's position has advanced for at least one topic partition");
                     }
-
+                    //1.6 通过interceptors处理前置消费逻辑，并返回ConsumerRecords
                     return interceptors.onConsume(new ConsumerRecords<>(fetch.records()));
                 }
                 // We will wait for retryBackoffMs
@@ -709,6 +713,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
             return ConsumerRecords.empty();
         } finally {
+            //1.7 更新consumer监控指标，释放lock
             kafkaConsumerMetrics.recordPollEnd(timer.currentTimeMs());
             release();
         }
@@ -1475,26 +1480,33 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
     @Override
     public void unsubscribe() {
+        //1.1 获取锁，并确保当前消费者没有关闭
         acquireAndEnsureOpen();
         try {
+            //1.2 删除buffer中所有订阅的topic分区
             fetchBuffer.retainAll(Collections.emptySet());
             Timer timer = time.timer(Long.MAX_VALUE);
+
+            //1.3 向handler发送unsubscribeEvent
             UnsubscribeEvent unsubscribeEvent = new UnsubscribeEvent(calculateDeadlineMs(timer));
             applicationEventHandler.add(unsubscribeEvent);
             log.info("Unsubscribing all topics or patterns and assigned partitions {}",
                     subscriptions.assignedPartitions());
 
+            //1.4 循环处理background event
             try {
                 processBackgroundEvents(unsubscribeEvent.future(), timer);
                 log.info("Unsubscribed all topics or patterns and assigned partitions");
             } catch (TimeoutException e) {
                 log.error("Failed while waiting for the unsubscribe event to complete");
             }
+            //1.5 重置group的metadata
             resetGroupMetadata();
         } catch (Exception e) {
             log.error("Unsubscribe failed", e);
             throw e;
         } finally {
+            //1.6 释放lock
             release();
         }
     }
@@ -1804,11 +1816,17 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     }
 
     private void subscribeInternal(Collection<String> topics, Optional<ConsumerRebalanceListener> listener) {
+        //1.1 获取lock，并且判断是否已经close
         acquireAndEnsureOpen();
         try {
+            //1.2 判断group id是否有效
             maybeThrowInvalidGroupIdException();
+
+            //1.3 校验参数
             if (topics == null)
                 throw new IllegalArgumentException("Topic collection to subscribe to cannot be null");
+
+            //1.4 若为空，则unsubscribe
             if (topics.isEmpty()) {
                 // treat subscribing to empty topic list as the same as unsubscribing
                 unsubscribe();
@@ -1818,7 +1836,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
                         throw new IllegalArgumentException("Topic collection to subscribe to cannot contain null or empty topic");
                 }
 
-                // Clear the buffered data which are not a part of newly assigned topics
+                // 1.5 更新buffer中不再指定的partition
                 final Set<TopicPartition> currentTopicPartitions = new HashSet<>();
 
                 for (TopicPartition tp : subscriptions.assignedPartitions()) {
@@ -1828,14 +1846,17 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
                 fetchBuffer.retainAll(currentTopicPartitions);
                 log.info("Subscribed to topic(s): {}", String.join(", ", topics));
+
+                // 1.6 调用SubscriptionState.subscribe 更新订阅topic
                 if (subscriptions.subscribe(new HashSet<>(topics), listener))
+                    //若请求成功，更新metadata
                     this.metadataVersionSnapshot = metadata.requestUpdateForNewTopics();
 
-                // Trigger subscribe event to effectively join the group if not already part of it,
-                // or just send the new subscription to the broker.
+                // 1.7 向handler添加event
                 applicationEventHandler.add(new SubscriptionChangeEvent());
             }
         } finally {
+            //1.8 释放lock
             release();
         }
     }

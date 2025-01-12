@@ -136,15 +136,22 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      * </ol>
      */
     void runOnce() {
+
+        //1.1 通过ApplicationEventProcessor处理各类event
         processApplicationEvents();
 
         final long currentTimeMs = time.milliseconds();
+
         final long pollWaitTimeMs = requestManagers.entries().stream()
                 .filter(Optional::isPresent)
                 .map(Optional::get)
+                //1.2 循环调用RequestManager.poll(long)获取unsentRequests
                 .map(rm -> rm.poll(currentTimeMs))
+                //1.3 调用addAll，将unsentRequests添加到NetworkClientDelegate中
                 .map(networkClientDelegate::addAll)
                 .reduce(MAX_POLL_TIMEOUT_MS, Math::min);
+
+        //1.4 调用poll，发送请求，接收响应
         networkClientDelegate.poll(pollWaitTimeMs, currentTimeMs);
 
         cachedMaximumTimeToWait = requestManagers.entries().stream()
@@ -153,6 +160,7 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
                 .map(rm -> rm.maximumTimeToWait(currentTimeMs))
                 .reduce(Long.MAX_VALUE, Math::min);
 
+        //1.5 清理过期event
         reapExpiredApplicationEvents(currentTimeMs);
     }
 
@@ -160,9 +168,11 @@ public class ConsumerNetworkThread extends KafkaThread implements Closeable {
      * Process the events—if any—that were produced by the application thread.
      */
     private void processApplicationEvents() {
+        //1.1 获取queue中所有 event
         LinkedList<ApplicationEvent> events = new LinkedList<>();
         applicationEventQueue.drainTo(events);
 
+        //1.2 循环遍历，通过applicationEventProcessor处理event
         for (ApplicationEvent event : events) {
             try {
                 if (event instanceof CompletableEvent)

@@ -168,8 +168,13 @@ public class SubscriptionState {
     }
 
     public synchronized boolean subscribe(Set<String> topics, Optional<ConsumerRebalanceListener> listener) {
+        //1.1 配置rebalance listener
         registerRebalanceListener(listener);
+
+        //1.2 配置订阅类型
         setSubscriptionType(SubscriptionType.AUTO_TOPICS);
+
+        //1.3 更新subscription
         return changeSubscription(topics);
     }
 
