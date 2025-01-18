@@ -157,6 +157,7 @@ public class ApplicationEventProcessor implements EventProcessor<ApplicationEven
     }
 
     private void process(final PollEvent event) {
+        //1.1 更新自动提交offset、poll的timer
         if (requestManagers.commitRequestManager.isPresent()) {
             requestManagers.commitRequestManager.ifPresent(m -> m.updateAutoCommitTimer(event.pollTimeMs()));
             requestManagers.heartbeatRequestManager.ifPresent(hrm -> hrm.resetPollTimer(event.pollTimeMs()));

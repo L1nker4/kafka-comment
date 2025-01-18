@@ -218,11 +218,11 @@ public final class ConsumerUtils {
     public static <T> T getResult(Future<T> future, Timer timer) {
         try {
             return future.get(timer.remainingMs(), TimeUnit.MILLISECONDS);
-        } catch (ExecutionException e) {
-            throw maybeWrapAsKafkaException(e.getCause());
-        } catch (InterruptedException e) {
-            throw new InterruptException(e);
-        } catch (java.util.concurrent.TimeoutException e) {
+    } catch (ExecutionException e) {
+        throw maybeWrapAsKafkaException(e.getCause());
+    } catch (InterruptedException e) {
+        throw new InterruptException(e);
+    } catch (java.util.concurrent.TimeoutException e) {
             throw new TimeoutException(e);
         }
     }

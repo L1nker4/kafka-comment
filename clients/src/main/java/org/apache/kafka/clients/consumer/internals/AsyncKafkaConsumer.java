@@ -743,8 +743,10 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
     @Override
     public void commitAsync(Map<TopicPartition, OffsetAndMetadata> offsets, OffsetCommitCallback callback) {
+        //1.1 获取lock
         acquireAndEnsureOpen();
         try {
+            //1.2 创建异步提交事件，并提交到EventHandler
             AsyncCommitEvent asyncCommitEvent = new AsyncCommitEvent(offsets);
             lastPendingAsyncCommit = commit(asyncCommitEvent).whenComplete((r, t) -> {
 
@@ -771,10 +773,14 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
     }
 
     private CompletableFuture<Void> commit(final CommitEvent commitEvent) {
+        //1.1 检查是否抛出异常
         maybeThrowInvalidGroupIdException();
         maybeThrowFencedInstanceException();
+
+        //1.2 执行offset commit回调
         offsetCommitCallbackInvoker.executeCallbacks();
 
+        //1.3 更新partition metadata的leader Epoch
         Map<TopicPartition, OffsetAndMetadata> offsets = commitEvent.offsets();
         log.debug("Committing offsets: {}", offsets);
         offsets.forEach(this::updateLastSeenEpochIfNewer);
@@ -783,6 +789,7 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
             return CompletableFuture.completedFuture(null);
         }
 
+        //1.4 添加event，并返回CompletableFuture
         applicationEventHandler.add(commitEvent);
         return commitEvent.future();
     }
@@ -1336,17 +1343,24 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
     @Override
     public void commitSync(Map<TopicPartition, OffsetAndMetadata> offsets, Duration timeout) {
+
+        //1.1 获取lock
         acquireAndEnsureOpen();
         long commitStart = time.nanoseconds();
         try {
+            //1.2 向applicationEventHandler提交SyncCommitEvent
             SyncCommitEvent syncCommitEvent = new SyncCommitEvent(offsets, calculateDeadlineMs(time, timeout));
             CompletableFuture<Void> commitFuture = commit(syncCommitEvent);
 
+            //1.3 检查是否有lastPendingAsyncCommit任务需要执行
             Timer requestTimer = time.timer(timeout.toMillis());
             awaitPendingAsyncCommitsAndExecuteCommitCallbacks(requestTimer, true);
 
+            //1.4 将commitFuture配置到wakeupTrigger，调用future.get()等待完成
             wakeupTrigger.setActiveTask(commitFuture);
             ConsumerUtils.getResult(commitFuture, requestTimer);
+
+            //1.5 检查拦截器，执行前置commit方法
             interceptors.onCommit(offsets);
         } finally {
             wakeupTrigger.clearTask();
@@ -1726,11 +1740,19 @@ public class AsyncKafkaConsumer<K, V> implements ConsumerDelegate<K, V> {
 
     @Override
     public boolean updateAssignmentMetadataIfNeeded(Timer timer) {
+        //1.1 检查是否抛出异常
         maybeThrowFencedInstanceException();
+
+        //1.2 处理提交offset回调
         offsetCommitCallbackInvoker.executeCallbacks();
+
+        //1.3 检查更新metadata
         maybeUpdateSubscriptionMetadata();
+
+        //1.4 处理BackgroundEvent
         processBackgroundEvents();
 
+        //1.5 更新offset
         return updateFetchPositions(timer);
     }
 
