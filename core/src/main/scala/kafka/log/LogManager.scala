@@ -89,7 +89,10 @@ class LogManager(logDirs: Seq[File],
   private val metricsGroup = new KafkaMetricsGroup(this.getClass)
 
   private val logCreationOrDeletionLock = new Object
+
+  //用于存储日志的map结构
   private val currentLogs = new Pool[TopicPartition, UnifiedLog]()
+
   // Future logs are put in the directory with "-future" suffix. Future log is created when user wants to move replica
   // from one log directory to another log directory on the same broker. The directory of the future log will be renamed
   // to replace the current log of the partition after the future log catches up with the current log
@@ -131,6 +134,7 @@ class LogManager(logDirs: Seq[File],
 
   @volatile private var recoveryPointCheckpoints = liveLogDirs.map(dir =>
     (dir, new OffsetCheckpointFile(new File(dir, RecoveryPointCheckpointFile), logDirFailureChannel))).toMap
+
   @volatile private var logStartOffsetCheckpoints = liveLogDirs.map(dir =>
     (dir, new OffsetCheckpointFile(new File(dir, LogStartOffsetCheckpointFile), logDirFailureChannel))).toMap
 
@@ -333,6 +337,8 @@ class LogManager(logDirs: Seq[File],
     val logRecoveryPoint = recoveryPoints.getOrElse(topicPartition, 0L)
     val logStartOffset = logStartOffsets.getOrElse(topicPartition, 0L)
 
+
+    //1.1 创建UnifiedLog对象
     val log = UnifiedLog(
       dir = logDir,
       config = config,
@@ -351,9 +357,11 @@ class LogManager(logDirs: Seq[File],
       numRemainingSegments = numRemainingSegments,
       remoteStorageSystemEnable = remoteStorageSystemEnable)
 
+    //1.1 检查是否为待删除文件，添加到待删除队列中，后续定时任务执行删除动作
     if (logDir.getName.endsWith(UnifiedLog.DeleteDirSuffix)) {
       addLogToBeDeleted(log)
     } else if (logDir.getName.endsWith(UnifiedLog.StrayDirSuffix)) {
+      //1.2 检查是否为Stray分区
       addStrayLog(topicPartition, log)
       warn(s"Loaded stray log: $logDir")
     } else if (isStray(log)) {
@@ -365,12 +373,14 @@ class LogManager(logDirs: Seq[File],
       addStrayLog(log.topicPartition, log)
       warn(s"Log in ${logDir.getAbsolutePath} marked stray and renamed to ${log.dir.getAbsolutePath}")
     } else {
+      //previous保存旧值
       val previous = {
         if (log.isFuture)
           this.futureLogs.put(topicPartition, log)
         else
           this.currentLogs.put(topicPartition, log)
       }
+      //check是否重复
       if (previous != null) {
         if (log.isFuture)
           throw new IllegalStateException(s"Duplicate log directories found: ${log.dir.getAbsolutePath}, ${previous.dir.getAbsolutePath}")
@@ -411,11 +421,14 @@ class LogManager(logDirs: Seq[File],
    */
   private[log] def loadLogs(defaultConfig: LogConfig, topicConfigOverrides: Map[String, LogConfig], isStray: UnifiedLog => Boolean): Unit = {
     info(s"Loading logs from log dirs $liveLogDirs")
+
+    //1.1 定义线程池和任务队列
     val startMs = time.hiResClockMs()
     val threadPools = ArrayBuffer.empty[ExecutorService]
     val offlineDirs = mutable.Set.empty[(String, IOException)]
     val jobs = ArrayBuffer.empty[Seq[Future[_]]]
     var numTotalLogs = 0
+
     // log dir path -> number of Remaining logs map for remainingLogsToRecover metric
     val numRemainingLogs: ConcurrentMap[String, Int] = new ConcurrentHashMap[String, Int]
     // log recovery thread name -> number of remaining segments map for remainingSegmentsToRecover metric
@@ -426,15 +439,18 @@ class LogManager(logDirs: Seq[File],
       error(s"Error while loading log dir $logDirAbsolutePath", e)
     }
 
+    //1.2 循环liveLogDirs
     val uncleanLogDirs = mutable.Buffer.empty[String]
     for (dir <- liveLogDirs) {
       val logDirAbsolutePath = dir.getAbsolutePath
       var hadCleanShutdown: Boolean = false
+      //1.3 每个data dir分配一个线程池去加载
       try {
         val pool = Executors.newFixedThreadPool(numRecoveryThreadsPerDataDir,
           new LogRecoveryThreadFactory(logDirAbsolutePath))
         threadPools.append(pool)
 
+        //1.4 检查上次是否为clean shutdown, 删除文件是为了防止加载日志时发生crash后仍然被认为是clean shutdown
         val cleanShutdownFileHandler = new CleanShutdownFileHandler(dir.getPath)
         if (cleanShutdownFileHandler.exists()) {
           // Cache the clean shutdown status and use that for rest of log loading workflow. Delete the CleanShutdownFile
@@ -442,8 +458,12 @@ class LogManager(logDirs: Seq[File],
           cleanShutdownFileHandler.delete()
           hadCleanShutdown = true
         }
+
+        //1.5 更新当前log dir是否为clean shutdown
         hadCleanShutdownFlags.put(logDirAbsolutePath, hadCleanShutdown)
 
+
+        //1.6 获取当前dir的recovery point信息和log start offset信息
         var recoveryPoints = Map[TopicPartition, Long]()
         try {
           recoveryPoints = this.recoveryPointCheckpoints(dir).read()
@@ -462,12 +482,14 @@ class LogManager(logDirs: Seq[File],
               s"$logDirAbsolutePath, resetting to the base offset of the first segment", e)
         }
 
+        //1.7 忽略remote存储的topic
         val logsToLoad = Option(dir.listFiles).getOrElse(Array.empty).filter(logDir =>
           logDir.isDirectory &&
             // Ignore remote-log-index-cache directory as that is index cache maintained by tiered storage subsystem
             // but not any topic-partition dir.
             !logDir.getName.equals(RemoteIndexCache.DIR_NAME) &&
             UnifiedLog.parseTopicPartitionName(logDir).topic != KafkaRaftServer.MetadataTopic)
+
         numTotalLogs += logsToLoad.length
         numRemainingLogs.put(logDirAbsolutePath, logsToLoad.length)
         loadLogsCompletedFlags.put(logDirAbsolutePath, logsToLoad.isEmpty)
@@ -483,6 +505,7 @@ class LogManager(logDirs: Seq[File],
           uncleanLogDirs.append(logDirAbsolutePath)
         }
 
+        //1.8 遍历当前dir，构建runnable加载任务，runnable调用loadLog构造UnifiedLog
         val jobsForDir = logsToLoad.map { logDir =>
           val runnable: Runnable = () => {
             debug(s"Loading log $logDir")
@@ -524,6 +547,7 @@ class LogManager(logDirs: Seq[File],
       }
     }
 
+    //1.9 添加Metrics
     try {
       addLogRecoveryMetrics(numRemainingLogs, numRemainingSegments)
       for (dirJobs <- jobs) {
@@ -620,6 +644,7 @@ class LogManager(logDirs: Seq[File],
     defaultConfig: LogConfig,
     topicConfigOverrides: Map[String, LogConfig],
     isStray: UnifiedLog => Boolean): Unit = {
+
     loadLogs(defaultConfig, topicConfigOverrides, isStray) // this could take a while if shutdown was not clean
 
     /* Schedule the cleanup task to delete old logs */
