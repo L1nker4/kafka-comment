@@ -1364,9 +1364,12 @@ class Partition(val topicPartition: TopicPartition,
 
   def appendRecordsToLeader(records: MemoryRecords, origin: AppendOrigin, requiredAcks: Int,
                             requestLocal: RequestLocal, verificationGuard: VerificationGuard = VerificationGuard.SENTINEL): LogAppendInfo = {
+    //1.1 加读锁
     val (info, leaderHWIncremented) = inReadLock(leaderIsrUpdateLock) {
+      // 1.2 判断是否为leader副本
       leaderLogIfLocal match {
         case Some(leaderLog) =>
+          //1.3 获取最小ISR
           val minIsr = effectiveMinIsr(leaderLog)
           val inSyncSize = partitionState.isr.size
 
@@ -1376,6 +1379,7 @@ class Partition(val topicPartition: TopicPartition,
               s"is insufficient to satisfy the min.isr requirement of $minIsr for partition $topicPartition")
           }
 
+          // 1.4 调用UnifiedLog的appendAsLeader方法进行写入
           val info = leaderLog.appendAsLeader(records, leaderEpoch = this.leaderEpoch, origin,
             interBrokerProtocolVersion, requestLocal, verificationGuard)
 
@@ -1423,6 +1427,8 @@ class Partition(val topicPartition: TopicPartition,
     minOneMessage: Boolean,
     updateFetchState: Boolean
   ): LogReadInfo = {
+
+    //定义
     def readFromLocalLog(log: UnifiedLog): LogReadInfo = {
       readRecords(
         log,
@@ -1435,7 +1441,9 @@ class Partition(val topicPartition: TopicPartition,
       )
     }
 
+    //检查请求是否来自partition的follower
     if (fetchParams.isFromFollower) {
+      //需要检查是否来自有效的follower
       // Check that the request is from a valid replica before doing the read
       val (replica, logReadInfo) = inReadLock(leaderIsrUpdateLock) {
         val localLog = localLogWithEpochOrThrow(

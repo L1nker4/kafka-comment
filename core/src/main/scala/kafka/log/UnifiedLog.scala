@@ -168,7 +168,9 @@ class UnifiedLog(@volatile var logStartOffset: Long,
       }
     }
 
+    //初始化partition.metadata文件
     initializePartitionMetadata()
+    //更新logStartOffset
     updateLogStartOffset(logStartOffset)
     updateLocalLogStartOffset(math.max(logStartOffset, localLog.segments.firstSegmentBaseOffset.orElse(0L)))
     if (!remoteLogEnabled())
@@ -773,21 +775,28 @@ class UnifiedLog(@volatile var logStartOffset: Long,
                      ignoreRecordSize: Boolean): LogAppendInfo = {
     // We want to ensure the partition metadata file is written to the log dir before any log data is written to disk.
     // This will ensure that any log data can be recovered with the correct topic ID in the case of failure.
+    //1.1 将metadata文件刷入磁盘
     maybeFlushMetadataFile()
 
+    //1.2 校验消息
     val appendInfo = analyzeAndValidateRecords(records, origin, ignoreRecordSize, !validateAndAssignOffsets, leaderEpoch)
 
     // return if we have no valid messages or if this is a duplicate of the last appended entry
     if (appendInfo.validBytes <= 0) appendInfo
     else {
 
+      //1.3 清除消息中的不合法字节
       // trim any invalid bytes or partial messages before appending it to the on-disk log
       var validRecords = trimInvalidBytes(records, appendInfo)
 
+
+      //1.4 设置同步，执行写入
       // they are valid, insert them in the log
       lock synchronized {
         maybeHandleIOException(s"Error while appending records to $topicPartition in dir ${dir.getParent}") {
           localLog.checkIfMemoryMappedBufferClosed()
+
+          //1.5 检查是否需要手动分配offset
           if (validateAndAssignOffsets) {
             // assign offsets to the message set
             val offset = PrimitiveRef.ofLong(localLog.logEndOffset)
@@ -842,6 +851,7 @@ class UnifiedLog(@volatile var logStartOffset: Long,
               }
             }
           } else {
+            // 从appendInfo获取offset
             // we are taking the offsets we are given
             if (appendInfo.firstOrLastOffsetOfFirstBatch < localLog.logEndOffset) {
               // we may still be able to recover if the log is empty
@@ -881,6 +891,7 @@ class UnifiedLog(@volatile var logStartOffset: Long,
               s"to partition $topicPartition, which exceeds the maximum configured segment size of ${config.segmentSize}.")
           }
 
+          // 2.1 检查LogSegment是否已满，并返回对应的LogSegment
           // maybe roll the log if this segment is full
           val segment = maybeRoll(validRecords.sizeInBytes, appendInfo)
 
@@ -889,6 +900,7 @@ class UnifiedLog(@volatile var logStartOffset: Long,
             segment.baseOffset,
             segment.size)
 
+          //2.2 检查事务状态
           // now that we have valid records, offsets assigned, and timestamps updated, we need to
           // validate the idempotent/transactional state of the producers and collect some metadata
           val (updatedProducers, completedTxns, maybeDuplicate) = analyzeAndValidateProducerState(
@@ -907,6 +919,8 @@ class UnifiedLog(@volatile var logStartOffset: Long,
               // will be cleaned up after the log directory is recovered. Note that the end offset of the
               // ProducerStateManager will not be updated and the last stable offset will not advance
               // if the append to the transaction index fails.
+
+              //2.3 调用append()方法执行写入，并更新localLog.logEndOffset和highWatermark
               localLog.append(appendInfo.lastOffset, appendInfo.maxTimestamp, appendInfo.shallowOffsetOfMaxTimestamp, validRecords)
               updateHighWatermarkWithLogEndOffset()
 

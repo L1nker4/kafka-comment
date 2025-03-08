@@ -771,11 +771,13 @@ class ReplicaManager(val config: KafkaConfig,
 
     val produceStatus = buildProducePartitionStatus(localProduceResults)
 
+
     addCompletePurgatoryAction(actionQueue, localProduceResults)
     recordValidationStatsCallback(localProduceResults.map { case (k, v) =>
       k -> v.info.recordValidationStats
     })
 
+    //其他副本写入的延迟任务
     maybeAddDelayedProduce(
       requiredAcks,
       delayedProduceLock,
@@ -952,6 +954,8 @@ class ReplicaManager(val config: KafkaConfig,
     initialProduceStatus: Map[TopicPartition, ProducePartitionStatus],
     responseCallback: Map[TopicPartition, PartitionResponse] => Unit,
   ): Unit = {
+
+    //1.1 检查是否满足远程写入的要求
     if (delayedProduceRequestRequired(requiredAcks, entriesPerPartition, initialAppendResults)) {
       // create delayed produce operation
       val produceMetadata = ProduceMetadata(requiredAcks, initialProduceStatus)
@@ -1376,6 +1380,8 @@ class ReplicaManager(val config: KafkaConfig,
                                requestLocal: RequestLocal,
                                verificationGuards: Map[TopicPartition, VerificationGuard]): Map[TopicPartition, LogAppendResult] = {
     val traceEnabled = isTraceEnabled
+
+    //1.1 定义异常处理函数
     def processFailedRecord(topicPartition: TopicPartition, t: Throwable) = {
       val logStartOffset = onlinePartition(topicPartition).map(_.logStartOffset).getOrElse(-1L)
       brokerTopicStats.topicStats(topicPartition.topic).failedProduceRequestRate.mark()
@@ -1404,12 +1410,16 @@ class ReplicaManager(val config: KafkaConfig,
           Some(new InvalidTopicException(s"Cannot append to internal topic ${topicPartition.topic}")),
           hasCustomErrorMessage = false))
       } else {
+        //1.1 获取partition对象
         try {
           val partition = getPartitionOrException(topicPartition)
+          //1.2 向该分区对象写入消息集合
           val info = partition.appendRecordsToLeader(records, origin, requiredAcks, requestLocal,
             verificationGuards.getOrElse(topicPartition, VerificationGuard.SENTINEL))
           val numAppendedMessages = info.numMessages
 
+
+          //1.3 返回写入结果
           // update stats for successfully appended bytes and messages as bytesInRate and messageInRate
           brokerTopicStats.topicStats(topicPartition.topic).bytesInRate.mark(records.sizeInBytes)
           brokerTopicStats.allTopicsStats.bytesInRate.mark(records.sizeInBytes)
@@ -1612,7 +1622,9 @@ class ReplicaManager(val config: KafkaConfig,
     readFromPurgatory: Boolean): Seq[(TopicIdPartition, LogReadResult)] = {
     val traceEnabled = isTraceEnabled
 
+
     def checkFetchDataInfo(partition: Partition, givenFetchedDataInfo: FetchDataInfo) = {
+      //1. 检查副本是否为IS，并且是否被限流
       if (params.isFromFollower && shouldLeaderThrottle(quota, partition, params.replicaId)) {
         // If the partition is being throttled, simply return an empty set.
         new FetchDataInfo(givenFetchedDataInfo.fetchOffsetMetadata, MemoryRecords.EMPTY)
@@ -1640,17 +1652,22 @@ class ReplicaManager(val config: KafkaConfig,
             s"remaining response limit $limitBytes" +
             (if (minOneMessage) s", ignoring response/partition size limits" else ""))
 
+        //1.1 获取对应partition
         partition = getPartitionOrException(tp.topicPartition)
 
+
+        //1.2 检查topicId
         // Check if topic ID from the fetch request/session matches the ID in the log
         val topicId = if (tp.topicId == Uuid.ZERO_UUID) None else Some(tp.topicId)
         if (!hasConsistentTopicId(topicId, partition.topicId))
           throw new InconsistentTopicIdException("Topic ID in the fetch session did not match the topic ID in the log.")
 
+        //1.3 检查是否有更合适的read-replica
         // If we are the leader, determine the preferred read-replica
         val preferredReadReplica = params.clientMetadata.asScala.flatMap(
           metadata => findPreferredReadReplica(partition, metadata, params.replicaId, fetchInfo.fetchOffset, fetchTimeMs))
 
+        //1.4 若有则直接return
         if (preferredReadReplica.isDefined) {
           replicaSelectorOpt.foreach { selector =>
             debug(s"Replica selector ${selector.getClass.getSimpleName} returned preferred replica " +
@@ -1671,6 +1688,7 @@ class ReplicaManager(val config: KafkaConfig,
         } else {
           log = partition.localLogWithEpochOrThrow(fetchInfo.currentLeaderEpoch, params.fetchOnlyLeader())
 
+          //调用partition的fetchRecords读取消息
           // Try the read first, this tells us whether we need all of adjustedFetchSize for this partition
           val readInfo: LogReadInfo = partition.fetchRecords(
             fetchParams = params,
