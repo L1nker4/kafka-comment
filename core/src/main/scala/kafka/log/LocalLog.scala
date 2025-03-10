@@ -361,6 +361,8 @@ class LocalLog(@volatile private var _dir: File,
       trace(s"Reading maximum $maxLength bytes at offset $startOffset from log with " +
         s"total length ${segments.sizeInBytes} bytes")
 
+
+      //1.1 选择offset所在的segment
       val endOffsetMetadata = nextOffsetMetadata
       val endOffset = endOffsetMetadata.messageOffset
       var segmentOpt = segments.floorSegment(startOffset)
@@ -414,7 +416,9 @@ class LocalLog(@volatile private var _dir: File,
   }
 
   private[log] def append(lastOffset: Long, largestTimestamp: Long, shallowOffsetOfMaxTimestamp: Long, records: MemoryRecords): Unit = {
+    //获取logsegments中最后一个segment，调用append方法
     segments.activeSegment.append(lastOffset, largestTimestamp, shallowOffsetOfMaxTimestamp, records)
+    //更新log end offset
     updateLogEndOffset(lastOffset + 1)
   }
 

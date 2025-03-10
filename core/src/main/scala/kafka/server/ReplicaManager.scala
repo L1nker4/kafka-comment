@@ -759,25 +759,28 @@ class ReplicaManager(val config: KafkaConfig,
                     requestLocal: RequestLocal = RequestLocal.NoCaching,
                     actionQueue: ActionQueue = this.defaultActionQueue,
                     verificationGuards: Map[TopicPartition, VerificationGuard] = Map.empty): Unit = {
+    //1.1 检查ack参数是否合法
     if (!isValidRequiredAcks(requiredAcks)) {
       sendInvalidRequiredAcksResponse(entriesPerPartition, responseCallback)
       return
     }
 
+    //1.2 调用appendToLocalLog写入local log
     val sTime = time.milliseconds
     val localProduceResults = appendToLocalLog(internalTopicsAllowed = internalTopicsAllowed,
       origin, entriesPerPartition, requiredAcks, requestLocal, verificationGuards.toMap)
     debug("Produce to local log in %d ms".format(time.milliseconds - sTime))
 
+    //1.3 构建ProducePartitionStatus
     val produceStatus = buildProducePartitionStatus(localProduceResults)
 
-
+    //1.4 将写入完成的响应结果localProduceResults，加到actionQueue，如果leader high watermark发生变更，会触发延迟操作
     addCompletePurgatoryAction(actionQueue, localProduceResults)
     recordValidationStatsCallback(localProduceResults.map { case (k, v) =>
       k -> v.info.recordValidationStats
     })
 
-    //其他副本写入的延迟任务
+    //1.5 检查是否需要执行延迟操作，将消息写入其他replica
     maybeAddDelayedProduce(
       requiredAcks,
       delayedProduceLock,
@@ -1529,6 +1532,7 @@ class ReplicaManager(val config: KafkaConfig,
                     quota: ReplicaQuota,
                     responseCallback: Seq[(TopicIdPartition, FetchPartitionData)] => Unit): Unit = {
 
+    //1.1 调用readFromLog方法，获取消息
     // check if this fetch request can be satisfied right away
     val logReadResults = readFromLog(params, fetchInfos, quota, readFromPurgatory = false)
     var bytesReadable: Long = 0
@@ -1541,6 +1545,7 @@ class ReplicaManager(val config: KafkaConfig,
     var hasPreferredReadReplica = false
     val logReadResultMap = new mutable.HashMap[TopicIdPartition, LogReadResult]
 
+    //2.1 更新统计指标
     logReadResults.foreach { case (topicIdPartition, logReadResult) =>
       brokerTopicStats.topicStats(topicIdPartition.topicPartition.topic).totalFetchRequestRate.mark()
       brokerTopicStats.allTopicsStats.totalFetchRequestRate.mark()
@@ -1557,6 +1562,7 @@ class ReplicaManager(val config: KafkaConfig,
       logReadResultMap.put(topicIdPartition, logReadResult)
     }
 
+    //不需要远程获取，或者满足任一条件
     // Respond immediately if no remote fetches are required and any of the below conditions is true
     //                        1) fetch request does not want to wait
     //                        2) fetch request does not require any data
@@ -1572,6 +1578,7 @@ class ReplicaManager(val config: KafkaConfig,
       }
       responseCallback(fetchPartitionData)
     } else {
+      //构建返回结果
       // construct the fetch results from the read results
       val fetchPartitionStatus = new mutable.ArrayBuffer[(TopicIdPartition, FetchPartitionStatus)]
       fetchInfos.foreach { case (topicIdPartition, partitionData) =>
@@ -1581,6 +1588,7 @@ class ReplicaManager(val config: KafkaConfig,
         })
       }
 
+      //执行远程fetch
       if (remoteFetchInfo.isPresent) {
         val maybeLogReadResultWithError = processRemoteFetch(remoteFetchInfo.get(), params, responseCallback, logReadResults, fetchPartitionStatus)
         if (maybeLogReadResultWithError.isDefined) {
@@ -1624,7 +1632,7 @@ class ReplicaManager(val config: KafkaConfig,
 
 
     def checkFetchDataInfo(partition: Partition, givenFetchedDataInfo: FetchDataInfo) = {
-      //1. 检查副本是否为IS，并且是否被限流
+      //1. 检查副本是否为ISR，并且是否被限流
       if (params.isFromFollower && shouldLeaderThrottle(quota, partition, params.replicaId)) {
         // If the partition is being throttled, simply return an empty set.
         new FetchDataInfo(givenFetchedDataInfo.fetchOffsetMetadata, MemoryRecords.EMPTY)

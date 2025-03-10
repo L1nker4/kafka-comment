@@ -338,7 +338,7 @@ class LogManager(logDirs: Seq[File],
     val logStartOffset = logStartOffsets.getOrElse(topicPartition, 0L)
 
 
-    //1.1 创建UnifiedLog对象
+    //1.1 创建UnifiedLog对象，这里会调用UnifiedLog的apply方法
     val log = UnifiedLog(
       dir = logDir,
       config = config,
@@ -357,7 +357,7 @@ class LogManager(logDirs: Seq[File],
       numRemainingSegments = numRemainingSegments,
       remoteStorageSystemEnable = remoteStorageSystemEnable)
 
-    //1.1 检查是否为待删除文件，添加到待删除队列中，后续定时任务执行删除动作
+    //1.2 检查是否为待删除文件，添加到待删除队列中，后续定时任务执行删除动作
     if (logDir.getName.endsWith(UnifiedLog.DeleteDirSuffix)) {
       addLogToBeDeleted(log)
     } else if (logDir.getName.endsWith(UnifiedLog.StrayDirSuffix)) {

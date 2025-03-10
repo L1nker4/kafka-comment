@@ -86,6 +86,7 @@ class LogLoader(
    *                                           overflow index offset
    */
   def load(): LoadedLogOffsets = {
+    //1.1 删除所有临时文件并收集所有中断的swap文件
     // First pass: through the files in the log directory and remove any temporary files
     // and find any interrupted swap operations
     val swapFiles = removeTempFilesAndCollectSwapFiles()
@@ -95,6 +96,8 @@ class LogLoader(
     // segments are compacted/split and delete these segment files: this is done by calculating
     // min/maxSwapFileOffset.
     // We store segments that require renaming in this code block, and do the actual renaming later.
+
+    //1.2 将压缩/切分的swap文件，计算出minSwapFileOffset和maxSwapFileOffset
     var minSwapFileOffset = Long.MaxValue
     var maxSwapFileOffset = Long.MinValue
     swapFiles.filter(f => UnifiedLog.isLogFile(new File(Utils.replaceSuffix(f.getPath, SwapFileSuffix, "")))).foreach { f =>
@@ -112,6 +115,7 @@ class LogLoader(
       maxSwapFileOffset = Math.max(segment.readNextOffset, maxSwapFileOffset)
     }
 
+    //1.3 删除掉[minSwapFileOffset, maxSwapFileOffset)区间的segment
     // Second pass: delete segments that are between minSwapFileOffset and maxSwapFileOffset. As
     // discussed above, these segments were compacted or split but haven't been renamed to .delete
     // before shutting down the broker.
@@ -131,6 +135,7 @@ class LogLoader(
       }
     }
 
+    //1.4 rename所有swap文件
     // Third pass: rename all swap files.
     for (file <- dir.listFiles if file.isFile) {
       if (file.getName.endsWith(SwapFileSuffix)) {
@@ -139,6 +144,7 @@ class LogLoader(
       }
     }
 
+    //1.5 加载所有log和index
     // Fourth pass: load all the log and index files.
     // We might encounter legacy log segments with offset overflow (KAFKA-6264). We need to split such segments. When
     // this happens, restart loading segment files from scratch.
@@ -146,8 +152,11 @@ class LogLoader(
       // In case we encounter a segment with offset overflow, the retry logic will split it after which we need to retry
       // loading of segments. In that case, we also need to close all segments that could have been left open in previous
       // call to loadSegmentFiles().
+
+      //重试前清除之前的加载
       segments.close()
       segments.clear()
+      //加载文件
       loadSegmentFiles()
     })
 
@@ -302,7 +311,9 @@ class LogLoader(
   private def loadSegmentFiles(): Unit = {
     // load segments in ascending order because transactional data from one segment may depend on the
     // segments that come before it
+    //1. 按升序加载
     for (file <- dir.listFiles.sortBy(_.getName) if file.isFile) {
+      //1.1 检查是否为index文件，若是则检查它的log文件是否存在
       if (isIndexFile(file)) {
         // if it is an index file, make sure it has a corresponding .log file
         val offset = offsetFromFile(file)
@@ -312,9 +323,11 @@ class LogLoader(
           Files.deleteIfExists(file.toPath)
         }
       } else if (isLogFile(file)) {
+        //1.2 加载log
         // if it's a log file, load the corresponding log segment
         val baseOffset = offsetFromFile(file)
         val timeIndexFileNewlyCreated = !LogFileUtils.timeIndexFile(dir, baseOffset).exists()
+        //1.3 调用LogSegment.open()
         val segment = LogSegment.open(
           dir,
           baseOffset,
@@ -324,7 +337,7 @@ class LogLoader(
           0,
           false,
           "")
-
+        //1.4 进行完整性检查
         try segment.sanityCheck(timeIndexFileNewlyCreated)
         catch {
           case _: NoSuchFileException =>
@@ -338,6 +351,7 @@ class LogLoader(
               " rebuilding index files...")
             recoverSegment(segment)
         }
+        //1.5 更新当前LogSegments
         segments.add(segment)
       }
     }
