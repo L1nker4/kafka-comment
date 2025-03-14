@@ -210,10 +210,14 @@ public final class KafkaEventQueue implements EventQueue {
             Throwable toDeliver = null;
             EventContext toRun = null;
             boolean wasInterrupted = false;
+            //1.1 循环处理事件
             while (true) {
+                //1.2 如果toRun不为空，则运行事件event.run()
                 if (toRun != null) {
                     wasInterrupted = toRun.run(log, toDeliver);
                 }
+
+                //1.3 上锁检查deadlineMap 中是否有超时或延迟事件
                 lock.lock();
                 try {
                     if (toRun != null) {
@@ -227,12 +231,15 @@ public final class KafkaEventQueue implements EventQueue {
                     }
                     long awaitNs = Long.MAX_VALUE;
                     Map.Entry<Long, EventContext> entry = deadlineMap.firstEntry();
+
+                    //1.4 如果deadlineMap不为空，则获取第一个事件
                     if (entry != null) {
                         // Search for timed-out events or deferred events that are ready
                         // to run.
                         long now = time.nanoseconds();
                         long timeoutNs = entry.getKey();
                         EventContext eventContext = entry.getValue();
+                        //1.5 如果第一个事件超时，赋值toRun，在下一轮循环执行
                         if (timeoutNs <= now) {
                             if (eventContext.insertionType == EventInsertionType.DEFERRED) {
                                 // The deferred event is ready to run.  Prepend it to the
@@ -261,6 +268,8 @@ public final class KafkaEventQueue implements EventQueue {
                         }
                         awaitNs = timeoutNs - now;
                     }
+
+                    //2.1 如果队列为空，并且shuttingDown或interrupted，则直接退出循环
                     if (head.next == head) {
                         if (deadlineMap.isEmpty() && (shuttingDown || interrupted)) {
                             // If there are no more entries to process, and the queue is
@@ -268,6 +277,7 @@ public final class KafkaEventQueue implements EventQueue {
                             return;
                         }
                     } else {
+                        //2.2 否则获取队列的第一个事件，赋值toRun，在下一轮循环执行
                         if (interrupted) {
                             toDeliver = new InterruptedException("The event handler thread is interrupted");
                         } else {
@@ -277,6 +287,8 @@ public final class KafkaEventQueue implements EventQueue {
                         remove(toRun);
                         continue;
                     }
+
+                    //3.1 wait等待新事件
                     if (awaitNs == Long.MAX_VALUE) {
                         try {
                             cond.await();
@@ -302,6 +314,7 @@ public final class KafkaEventQueue implements EventQueue {
 
         Exception enqueue(EventContext eventContext,
                           Function<OptionalLong, OptionalLong> deadlineNsCalculator) {
+            //1.1 上锁，检查是否关闭或中断
             lock.lock();
             try {
                 if (shuttingDown) {
@@ -310,6 +323,8 @@ public final class KafkaEventQueue implements EventQueue {
                 if (interrupted) {
                     return new InterruptedException("The event handler thread is interrupted");
                 }
+
+                //1.2 检查tag、计算deadline time
                 OptionalLong existingDeadlineNs = OptionalLong.empty();
                 if (eventContext.tag != null) {
                     EventContext toRemove =
@@ -323,6 +338,7 @@ public final class KafkaEventQueue implements EventQueue {
                 OptionalLong deadlineNs = deadlineNsCalculator.apply(existingDeadlineNs);
                 boolean queueWasEmpty = head.isSingleton();
                 boolean shouldSignal = false;
+                //1.3 根据插入类型，选择插入位置
                 switch (eventContext.insertionType) {
                     case APPEND:
                         head.insertBefore(eventContext);
@@ -343,6 +359,8 @@ public final class KafkaEventQueue implements EventQueue {
                         }
                         break;
                 }
+
+                //1.4 如果事件有deadline time，将其插入deadlineMap中，更新size，唤醒等待线程
                 if (deadlineNs.isPresent()) {
                     long insertNs = deadlineNs.getAsLong();
                     long prevStartNs = deadlineMap.isEmpty() ? Long.MAX_VALUE : deadlineMap.firstKey();

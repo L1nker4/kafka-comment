@@ -777,19 +777,31 @@ public final class QuorumController implements Controller {
         public void run() throws Exception {
             // Deferred events set the DOES_NOT_UPDATE_QUEUE_TIME flag to prevent incorrectly
             // including their deferral time in the event queue time.
+            //1.1 初始化开始时间
             startProcessingTimeNs = OptionalLong.of(
                 updateEventStartMetricsAndGetTime(flags.contains(DOES_NOT_UPDATE_QUEUE_TIME) ?
                     OptionalLong.empty() : OptionalLong.of(eventCreatedTimeNs)));
+
+            //1.2 检查是否为active controller
             int controllerEpoch = curClaimEpoch;
             if (!isActiveController(controllerEpoch)) {
                 throw ControllerExceptions.newWrongControllerException(latestController());
             }
+
+            //1.3 检查是否PreMigrationMode
             if (featureControl.inPreMigrationMode() && !flags.contains(RUNS_IN_PREMIGRATION)) {
                 log.info("Cannot run write operation {} in pre-migration mode. Returning NOT_CONTROLLER.", name);
                 throw ControllerExceptions.newPreMigrationException(latestController());
             }
+
+            //1.4 调用op.generateRecordsAndResult()方法，生成记录和结果
+            //这里的generateRecordsAndResult()方法通常是对应事件的具体处理逻辑，例如createTopics
             ControllerResult<T> result = op.generateRecordsAndResult();
+
+            //1.5 检查结果，若为空，说明是一个read-only操作
             if (result.records().isEmpty()) {
+
+                //1.6 调用op.processBatchEndOffset设置end offset
                 op.processBatchEndOffset(offsetControl.nextWriteOffset() - 1);
                 // If the operation did not return any records, then it was actually just
                 // a read after all, and not a read + write.  However, this read was done
@@ -817,6 +829,8 @@ public final class QuorumController implements Controller {
                         "reaches offset {}", this, resultAndOffset.offset());
                 }
             } else {
+
+                //2.1 将记录写到本地，并提交到Raft层
                 // Pass the records to the Raft layer. This will start the process of committing
                 // them to the log.
                 long offset = appendRecords(log, result, maxRecordsPerBatch,
@@ -824,12 +838,15 @@ public final class QuorumController implements Controller {
                         // Start by trying to apply the record to our in-memory state. This should always
                         // succeed; if it does not, that's a fatal error. It is important to do this before
                         // scheduling the record for Raft replication.
+
+                        //2.2 调用预写入，并返回新offset，只有在调用schedulePreparedAppend方法后，才会执行实际写入
                         int recordIndex = 0;
                         long lastOffset = raftClient.prepareAppend(controllerEpoch, records);
                         long baseOffset = lastOffset - records.size() + 1;
                         for (ApiMessageAndVersion message : records) {
                             long recordOffset = baseOffset + recordIndex;
                             try {
+                                //2.2 调用replay写入内存
                                 replay(message.message(), Optional.empty(), recordOffset);
                             } catch (Throwable e) {
                                 String failureMessage = String.format("Unable to apply %s " +
@@ -841,6 +858,7 @@ public final class QuorumController implements Controller {
                             }
                             recordIndex++;
                         }
+                        //2.3 执行写入
                         raftClient.schedulePreparedAppend();
                         offsetControl.handleScheduleAppend(lastOffset);
                         return lastOffset;
@@ -853,6 +871,7 @@ public final class QuorumController implements Controller {
                     "reaches offset {}.", this, resultAndOffset.offset());
             }
 
+            //3.1 检查是否需要leader rebalance和unclean leader election
             // After every controller write event, schedule a leader rebalance if there are any topic partition
             // with leader that is not the preferred leader.
             maybeScheduleNextBalancePartitionLeaders();
@@ -860,6 +879,7 @@ public final class QuorumController implements Controller {
             // Schedule a new unclean leader election if there are partitions that do not have a leader.
             maybeScheduleNextElectUncleanLeaders();
 
+            //3.2
             // Remember the latest offset and future if it is not already completed
             if (!future.isDone()) {
                 if (featureControl.inPreMigrationMode() && flags.contains(RUNS_IN_PREMIGRATION)) {

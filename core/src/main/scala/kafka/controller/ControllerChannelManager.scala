@@ -218,12 +218,12 @@ class ControllerChannelManager(controllerEpoch: () => Int,
 case class QueueItem(apiKey: ApiKeys, request: AbstractControlRequest.Builder[_ <: AbstractControlRequest],
                      callback: AbstractResponse => Unit, enqueueTimeMs: Long)
 
-class RequestSendThread(val controllerId: Int,
-                        controllerEpoch: () => Int,
-                        val queue: BlockingQueue[QueueItem],
-                        val networkClient: NetworkClient,
-                        val brokerNode: Node,
-                        val config: KafkaConfig,
+class RequestSendThread(val controllerId: Int,    //controller的broker id
+                        controllerEpoch: () => Int,     //当前controller epoch
+                        val queue: BlockingQueue[QueueItem],  //请求阻塞队列
+                        val networkClient: NetworkClient, //执行网络IO的客户端
+                        val brokerNode: Node,     //broker节点
+                        val config: KafkaConfig,    //配置信息
                         val time: Time,
                         val requestRateAndQueueTimeMetrics: Timer,
                         val stateChangeLogger: StateChangeLogger,
@@ -239,7 +239,9 @@ class RequestSendThread(val controllerId: Int,
 
     def backoff(): Unit = pause(100, TimeUnit.MILLISECONDS)
 
+    //1.1 从阻塞队列中获取请求
     val QueueItem(apiKey, requestBuilder, callback, enqueueTimeMs) = queue.take()
+    //1.2 更新监控指标
     requestRateAndQueueTimeMetrics.update(time.milliseconds() - enqueueTimeMs, TimeUnit.MILLISECONDS)
 
     var clientResponse: ClientResponse = null
@@ -249,11 +251,13 @@ class RequestSendThread(val controllerId: Int,
         // if a broker goes down for a long time, then at some point the controller's zookeeper listener will trigger a
         // removeBroker which will invoke shutdown() on this thread. At that point, we will stop retrying.
         try {
+          //2.1 检查与broker是否已经建立连接
           if (!brokerReady()) {
             isSendSuccessful = false
             backoff()
           }
           else {
+            //2.2 发送请求，等待接收response
             val clientRequest = networkClient.newClientRequest(brokerNode.idString, requestBuilder,
               time.milliseconds(), true)
             clientResponse = NetworkClientUtils.sendAndReceive(networkClient, clientRequest, time)
@@ -269,9 +273,11 @@ class RequestSendThread(val controllerId: Int,
             backoff()
         }
       }
+      //3.1 如果接收到response
       if (clientResponse != null) {
         val requestHeader = clientResponse.requestHeader
         val api = requestHeader.apiKey
+        //3.2 如果不是leaderAndIsr, stopReplica, updateMetadata请求，则抛出异常
         if (api != ApiKeys.LEADER_AND_ISR && api != ApiKeys.STOP_REPLICA && api != ApiKeys.UPDATE_METADATA)
           throw new KafkaException(s"Unexpected apiKey received: $apiKey")
 
@@ -281,6 +287,7 @@ class RequestSendThread(val controllerId: Int,
           s"$response for request $api with correlation id " +
           s"${requestHeader.correlationId} sent to broker $brokerNode")
 
+        //3.3 调用callback
         if (callback != null) {
           callback(response)
         }

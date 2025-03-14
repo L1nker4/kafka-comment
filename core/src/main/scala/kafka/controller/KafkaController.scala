@@ -949,7 +949,7 @@ class KafkaController(val config: KafkaConfig,
   }
 
   private def initializeControllerContext(): Unit = {
-    // update controller cache with delete topic information
+    // 1.1 获取所有broker和epoch信息
     val curBrokerAndEpochs = zkClient.getAllBrokerAndEpochsInCluster
     val (compatibleBrokerAndEpochs, incompatibleBrokerAndEpochs) = partitionOnFeatureCompatibility(curBrokerAndEpochs)
     if (incompatibleBrokerAndEpochs.nonEmpty) {
@@ -1551,12 +1551,14 @@ class KafkaController(val config: KafkaConfig,
      * it's possible that the controller has already been elected when we get here. This check will prevent the following
      * createEphemeralPath method from getting into an infinite loop if this broker is already the controller.
      */
+    //1.1 检查zk中是否已经有活跃controller
     if (activeControllerId != -1) {
       debug(s"Broker $activeControllerId has been elected as the controller, so stopping the election process.")
       return
     }
 
     try {
+      //1.2 尝试注册controller
       val (epoch, epochZkVersion) = zkClient.registerControllerAndIncrementControllerEpoch(config.brokerId)
       controllerContext.epoch = epoch
       controllerContext.epochZkVersion = epochZkVersion
@@ -1565,6 +1567,7 @@ class KafkaController(val config: KafkaConfig,
       info(s"${config.brokerId} successfully elected as the controller. Epoch incremented to ${controllerContext.epoch} " +
         s"and epoch zk version is now ${controllerContext.epochZkVersion}")
 
+      //1.3 调用onControllerFailover()，完成controller初始化动作，如果发生异常则撤销
       onControllerFailover()
     } catch {
       case e: ControllerMovedException =>

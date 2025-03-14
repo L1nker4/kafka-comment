@@ -251,19 +251,20 @@ object ReplicaManager {
   }
 }
 
-class ReplicaManager(val config: KafkaConfig,
-                     metrics: Metrics,
-                     time: Time,
-                     scheduler: Scheduler,
-                     val logManager: LogManager,
-                     val remoteLogManager: Option[RemoteLogManager] = None,
+class ReplicaManager(val config: KafkaConfig,//配置类
+                     metrics: Metrics,        //监控指标
+                     time: Time,              //时钟
+                     scheduler: Scheduler,    //定时调度器
+                     val logManager: LogManager, //日志管理
+                     val remoteLogManager: Option[RemoteLogManager] = None,//远程日志管理
                      quotaManagers: QuotaManagers,
-                     val metadataCache: MetadataCache,
-                     logDirFailureChannel: LogDirFailureChannel,
-                     val alterPartitionManager: AlterPartitionManager,
-                     val brokerTopicStats: BrokerTopicStats = new BrokerTopicStats(),
+                     val metadataCache: MetadataCache,    //broker元数据缓存
+                     logDirFailureChannel: LogDirFailureChannel, //读取日志失败时的阻塞队列，会有线程
+                     val alterPartitionManager: AlterPartitionManager, //分区变动处理器
+                     val brokerTopicStats: BrokerTopicStats = new BrokerTopicStats(), //topic监控指标
                      val isShuttingDown: AtomicBoolean = new AtomicBoolean(false),
-                     val zkClient: Option[KafkaZkClient] = None,
+                     val zkClient: Option[KafkaZkClient] = None, //zk客户端
+                    //处理延迟请求的Purgatory类
                      delayedProducePurgatoryParam: Option[DelayedOperationPurgatory[DelayedProduce]] = None,
                      delayedFetchPurgatoryParam: Option[DelayedOperationPurgatory[DelayedFetch]] = None,
                      delayedDeleteRecordsPurgatoryParam: Option[DelayedOperationPurgatory[DelayedDeleteRecords]] = None,
