@@ -102,7 +102,10 @@ class KafkaRequestHandler(
   @volatile private var stopped = false
 
   def run(): Unit = {
+    //1.1 设置当前线程的RequestChannel
     threadRequestChannel.set(requestChannel)
+
+    //1.2 线程未关闭的情况，循环处理请求
     while (!stopped) {
       // We use a single meter for aggregate idle percentage for the thread pool.
       // Since meter is calculated as total_recorded_value / time_window and
@@ -110,17 +113,21 @@ class KafkaRequestHandler(
       // time should be discounted by # threads.
       val startSelectTime = time.nanoseconds
 
+      //1.3 从requestChannel中获取请求
       val req = requestChannel.receiveRequest(300)
       val endTime = time.nanoseconds
       val idleTime = endTime - startSelectTime
       aggregateIdleMeter.mark(idleTime / totalHandlerThreads.get)
 
       req match {
+
+        //2.1 处理shutdown请求
         case RequestChannel.ShutdownRequest =>
           debug(s"Kafka request handler $id on broker $brokerId received shut down command")
           completeShutdown()
           return
 
+        //2.2 处理回调请求
         case callback: RequestChannel.CallbackRequest =>
           val originalRequest = callback.originalRequest
           try {
@@ -151,8 +158,10 @@ class KafkaRequestHandler(
             threadCurrentRequest.remove()
           }
 
+          //2.3 处理普通请求
         case request: RequestChannel.Request =>
           try {
+            //2.4 由apis处理请求
             request.requestDequeueTimeNanos = endTime
             trace(s"Kafka request handler $id on broker $brokerId handling request $request")
             threadCurrentRequest.set(request)
@@ -163,6 +172,7 @@ class KafkaRequestHandler(
               Exit.exit(e.statusCode)
             case e: Throwable => error("Exception when handling request", e)
           } finally {
+            // 移除thread local信息
             threadCurrentRequest.remove()
             request.releaseBuffer()
           }
@@ -174,6 +184,8 @@ class KafkaRequestHandler(
         case null => // continue
       }
     }
+
+    //3.1 处理关闭逻辑
     completeShutdown()
   }
 
