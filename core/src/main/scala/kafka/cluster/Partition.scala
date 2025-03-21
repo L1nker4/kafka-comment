@@ -294,7 +294,7 @@ class Partition(val topicPartition: TopicPartition,
                 val replicaLagTimeMaxMs: Long,
                 interBrokerProtocolVersion: MetadataVersion,
                 localBrokerId: Int,
-                localBrokerEpochSupplier: () => Long,
+                f: () => Long,
                 time: Time,
                 alterPartitionListener: AlterPartitionListener,
                 delayedOperations: DelayedOperations,
@@ -715,12 +715,15 @@ class Partition(val topicPartition: TopicPartition,
                  highWatermarkCheckpoints: OffsetCheckpoints,
                  topicId: Option[Uuid],
                  targetDirectoryId: Option[Uuid] = None): Boolean = {
+    //1.1 lock
     val (leaderHWIncremented, isNewLeader) = inWriteLock(leaderIsrUpdateLock) {
       // Partition state changes are expected to have an partition epoch larger or equal
       // to the current partition epoch. The latter is allowed because the partition epoch
       // is also updated by the AlterPartition response so the new epoch might be known
       // before a LeaderAndIsr request is received or before an update is received via
       // the metadata log.
+
+      //1.2 检查epoch
       if (partitionState.partitionEpoch < partitionEpoch) {
         stateChangeLogger.info(s"Skipped the become-leader state change for $topicPartition with topic id $topicId " +
           s"and partition state $partitionState since the leader is already at a newer partition epoch $partitionEpoch.")
@@ -746,6 +749,7 @@ class Partition(val topicPartition: TopicPartition,
 
       // Updating the assignment and ISR state is safe if the partition epoch is
       // larger or equal to the current partition epoch.
+      //1.3 更新 assignment 和 ISR
       updateAssignmentAndIsr(
         replicas = replicas,
         isLeader = true,
@@ -768,6 +772,7 @@ class Partition(val topicPartition: TopicPartition,
 
       // We update the epoch start offset and the replicas' state only if the leader epoch
       // has changed.
+      //1.4 更新 start offset
       if (isNewLeaderEpoch) {
         val leaderEpochStartOffset = leaderLog.logEndOffset
         stateChangeLogger.info(s"Leader $topicPartition with topic id $topicId starts at " +

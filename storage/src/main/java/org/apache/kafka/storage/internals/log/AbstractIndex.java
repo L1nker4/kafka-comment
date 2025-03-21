@@ -49,22 +49,28 @@ public abstract class AbstractIndex implements Closeable {
 
     protected final ReentrantLock lock = new ReentrantLock();
 
+    //当前文件的开始offset
     private final long baseOffset;
+
+    //最大索引大小
     private final int maxIndexSize;
+
+    //是否可写
     private final boolean writable;
 
+    //映射索引文件
     private volatile File file;
 
-    // Length of the index file
+    // 索引文件长度
     private volatile long length;
 
+    //mmap 内存映射buffer
     private volatile MappedByteBuffer mmap;
 
-    /**
-     * The maximum number of entries this index can hold
-     */
+    //最大索引entry数量
     private volatile int maxEntries;
-    /** The number of entries in this index */
+
+    //索引entry数量
     private volatile int entries;
 
 
@@ -468,12 +474,14 @@ public abstract class AbstractIndex implements Closeable {
     private static MappedByteBuffer createMappedBuffer(RandomAccessFile raf, boolean newlyCreated, long length,
                                                        boolean writable, int entrySize) throws IOException {
         MappedByteBuffer idx;
+        //1.1 通过FileChannel获取mappedByteBuffer
         if (writable)
             idx = raf.getChannel().map(FileChannel.MapMode.READ_WRITE, 0, length);
         else
             idx = raf.getChannel().map(FileChannel.MapMode.READ_ONLY, 0, length);
 
         /* set the position in the index for the next entry */
+        //1.2 配置position
         if (newlyCreated)
             idx.position(0);
         else
@@ -492,13 +500,17 @@ public abstract class AbstractIndex implements Closeable {
         if (entries == 0)
             return -1;
 
+
+        //1.1 获取当前第一个热区entry offset
         int firstHotEntry = Math.max(0, entries - 1 - warmEntries());
-        // check if the target offset is in the warm section of the index
+        // 1.2 检查目标offset，是否在热区范围内
         if (compareIndexEntry(parseEntry(idx, firstHotEntry), target, searchEntity) < 0) {
+            //1.3 缩减二分查找范围在热区范围内
             return binarySearch(idx, target, searchEntity,
                 searchResultType, firstHotEntry, entries - 1);
         }
 
+        //1.4 全量查找前检查offset是否小于最小offset
         // check if the target offset is smaller than the least offset
         if (compareIndexEntry(parseEntry(idx, 0), target, searchEntity) > 0) {
             switch (searchResultType) {

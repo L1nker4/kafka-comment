@@ -144,13 +144,19 @@ public class OffsetIndex extends AbstractIndex {
     public void append(long offset, int position) {
         lock.lock();
         try {
+            //1.1 检查索引文件是否写满
             if (isFull())
                 throw new IllegalArgumentException("Attempt to append to a full index (size = " + entries() + ").");
 
+            //1.2 如果当前文件为空，或者新添加的offset大于当前最后一个offset，则添加索引
             if (entries() == 0 || offset > lastOffset) {
                 log.trace("Adding index entry {} => {} to {}", offset, position, file().getAbsolutePath());
+
+                //1.3 写入相对offset和position
                 mmap().putInt(relativeOffset(offset));
                 mmap().putInt(position);
+
+                //1.4 更新entries数量和lastOffset
                 incrementEntries();
                 lastOffset = offset;
                 if (entries() * ENTRY_SIZE != mmap().position())

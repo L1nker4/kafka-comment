@@ -115,10 +115,15 @@ abstract class AbstractFetcherThread(name: String,
 
   private def maybeFetch(): Unit = {
     val fetchRequestOpt = inLock(partitionMapLock) {
+
+      //1.1 构造fetch请求
       val ResultWithPartitions(fetchRequestOpt, partitionsWithError) = leader.buildFetch(partitionStates.partitionStateMap.asScala)
 
+
+      //1.2 处理fetch异常
       handlePartitionsWithErrors(partitionsWithError, "maybeFetch")
 
+      //1.3 检查是否有可读取的partition，在等待fetchBackOffMs时间后重试
       if (fetchRequestOpt.isEmpty) {
         trace(s"There are no active partitions. Back off for $fetchBackOffMs ms before sending a fetch request")
         partitionMapCond.await(fetchBackOffMs, TimeUnit.MILLISECONDS)
@@ -127,6 +132,7 @@ abstract class AbstractFetcherThread(name: String,
       fetchRequestOpt
     }
 
+    //2.1 发送fetch请求，并处理fetch结果
     fetchRequestOpt.foreach { case ReplicaFetch(sessionPartitions, fetchRequest) =>
       processFetchRequest(sessionPartitions, fetchRequest)
     }
@@ -166,10 +172,15 @@ abstract class AbstractFetcherThread(name: String,
   }
 
   private def maybeTruncate(): Unit = {
+    //1.1 获取处于截断状态的partition，并按照epoch分组
     val (partitionsWithEpochs, partitionsWithoutEpochs) = fetchTruncatingPartitions()
+
+    //1.2 有epoch值的partition，按照epoch的end offset截断
     if (partitionsWithEpochs.nonEmpty) {
       truncateToEpochEndOffsets(partitionsWithEpochs)
     }
+
+    //1.3 对于没有epoch的partition，按照high watermark截断
     if (partitionsWithoutEpochs.nonEmpty) {
       truncateToHighWatermark(partitionsWithoutEpochs)
     }
@@ -312,6 +323,7 @@ abstract class AbstractFetcherThread(name: String,
     val divergingEndOffsets = mutable.Map.empty[TopicPartition, EpochEndOffset]
     var responseData: Map[TopicPartition, FetchData] = Map.empty
 
+    //1.1 向leader发送fetch请求
     try {
       trace(s"Sending fetch request $fetchRequest")
       responseData = leader.fetch(fetchRequest)
@@ -324,8 +336,10 @@ abstract class AbstractFetcherThread(name: String,
           }
         }
     }
+    //1.2 更新请求发送速率的指标
     fetcherStats.requestRate.mark()
 
+    //1.3 检查响应数据
     if (responseData.nonEmpty) {
       // process fetched data
       inLock(partitionMapLock) {
@@ -335,10 +349,13 @@ abstract class AbstractFetcherThread(name: String,
             // In this case, we only want to process the fetch response if the partition state is ready for fetch and
             // the current offset is the same as the offset requested.
             val fetchPartitionData = sessionPartitions.get(topicPartition)
+            //2.1 要保证获取的offset是当前partitionState的fetchOffset 且 partitionState是ready状态
             if (fetchPartitionData != null && fetchPartitionData.fetchOffset == currentFetchState.fetchOffset && currentFetchState.isReadyForFetch) {
               Errors.forCode(partitionData.errorCode) match {
                 case Errors.NONE =>
                   try {
+
+                    //2.2 检查是否存在发散epoch
                     if (leader.isTruncationOnFetchSupported && FetchResponse.isDivergingEpoch(partitionData)) {
                       // If a diverging epoch is present, we truncate the log of the replica
                       // but we don't process the partition data in order to not update the
@@ -350,6 +367,7 @@ abstract class AbstractFetcherThread(name: String,
                         .setLeaderEpoch(partitionData.divergingEpoch.epoch)
                         .setEndOffset(partitionData.divergingEpoch.endOffset)
                     } else {
+                      //2.3 交给子类处理fetch数据
                       // Once we hand off the partition data to the subclass, we can't mess with it any more in this thread
                       val logAppendInfoOpt = processPartitionData(
                         topicPartition,
@@ -370,6 +388,7 @@ abstract class AbstractFetcherThread(name: String,
                           // Update partitionStates only if there is no exception during processPartitionData
                           val newFetchState = PartitionFetchState(currentFetchState.topicId, nextOffset, Some(lag),
                             currentFetchState.currentLeaderEpoch, state = Fetching, lastFetchedEpoch)
+                          // 将partition的新state更新到末尾，保证公平性
                           partitionStates.updateAndMoveToEnd(topicPartition, newFetchState)
                           if (validBytes > 0) fetcherStats.byteRate.mark(validBytes)
                         }

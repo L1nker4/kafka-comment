@@ -166,29 +166,60 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
     public static final int MAX_BATCH_SIZE_BYTES = 8 * 1024 * 1024;
     public static final int MAX_FETCH_SIZE_BYTES = MAX_BATCH_SIZE_BYTES;
 
+    //节点id
     private final OptionalInt nodeId;
+
+    //节点目录id
     private final Uuid nodeDirectoryId;
+
+    //
     private final AtomicReference<GracefulShutdown> shutdown = new AtomicReference<>();
     private final LogContext logContext;
     private final Logger logger;
     private final Time time;
+
+    //fetch最大等待时间
     private final int fetchMaxWaitMs;
     private final boolean followersAlwaysFlush;
+
+    //集群id
     private final String clusterId;
+
+    //listener endpoint地址
     private final Endpoints localListeners;
+
+
     private final SupportedVersionRange localSupportedKRaftVersion;
+
+
     private final NetworkChannel channel;
+
+    //本地日志对象
     private final ReplicatedLog log;
     private final Random random;
+
+    //延迟任务
     private final FuturePurgatory<Long> appendPurgatory;
     private final FuturePurgatory<Long> fetchPurgatory;
+
+    //log写入工具接口
     private final RecordSerde<T> serde;
+
+    //内存池
     private final MemoryPool memoryPool;
+
+    //raft事件消息队列
     private final RaftMessageQueue messageQueue;
+
     private final QuorumConfig quorumConfig;
+
+    //raft snapshot清理
     private final RaftMetadataLogCleanerManager snapshotCleaner;
 
+    //listeners
     private final Map<Listener<T>, ListenerContext> listenerContexts = new IdentityHashMap<>();
+
+    //等待注册的listener队列
     private final ConcurrentLinkedQueue<Registration<T>> pendingRegistrations = new ConcurrentLinkedQueue<>();
 
     // These components need to be initialized by the method initialize() because they depend on
@@ -205,9 +236,17 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
      * 4. truncate new entries when a follower truncates their log
      * 5. truncate old entries when a snapshot gets generated
      */
+
+    //kraft状态机
     private volatile KRaftControlRecordStateMachine partitionState;
+
+    //kraft监控指标
     private volatile KafkaRaftMetrics kafkaRaftMetrics;
+
+    //Quorum状态
     private volatile QuorumState quorum;
+
+    //管理与其他controller的通信
     private volatile RequestManager requestManager;
 
     // Specialized handlers
@@ -3151,6 +3190,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
     }
 
     private long pollCurrentState(long currentTimeMs) {
+        //1.1 根据节点角色进行调用
         if (quorum.isLeader()) {
             return pollLeader(currentTimeMs);
         } else if (quorum.isCandidate()) {
