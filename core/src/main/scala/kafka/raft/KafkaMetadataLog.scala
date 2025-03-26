@@ -251,6 +251,8 @@ final class KafkaMetadataLog private (
   }
 
   override def createNewSnapshot(snapshotId: OffsetAndEpoch): Optional[RawSnapshotWriter] = {
+
+    //1.1 检查传入offset是否小于start offset和high watermark
     if (snapshotId.offset < startOffset) {
       info(s"Cannot create a snapshot with an id ($snapshotId) less than the log start offset ($startOffset)")
       return Optional.empty()
@@ -263,6 +265,7 @@ final class KafkaMetadataLog private (
       )
     }
 
+    //1.2 检查offset和epoch
     val validOffsetAndEpoch = validateOffsetAndEpoch(snapshotId.offset, snapshotId.epoch)
     if (validOffsetAndEpoch.kind() != ValidOffsetAndEpoch.Kind.VALID) {
       throw new IllegalArgumentException(
@@ -270,10 +273,13 @@ final class KafkaMetadataLog private (
       )
     }
 
+    //2.1 调用createNewSnapshotUnchecked
     createNewSnapshotUnchecked(snapshotId)
   }
 
   override def createNewSnapshotUnchecked(snapshotId: OffsetAndEpoch): Optional[RawSnapshotWriter] = {
+
+    //1.1 检查是否已有该snapshot
     val containsSnapshotId = snapshots synchronized {
       snapshots.contains(snapshotId)
     }
@@ -282,6 +288,7 @@ final class KafkaMetadataLog private (
       Optional.empty()
     } else {
       Optional.of(
+        //传入log dir，通过FileRawSnapshotWriter创建，FileRawSnapshotWriter内部封装了FileChannel
         new NotifyingRawSnapshotWriter(
           FileRawSnapshotWriter.create(log.dir.toPath, snapshotId),
           onSnapshotFrozen

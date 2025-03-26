@@ -188,10 +188,10 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
     //listener endpoint地址
     private final Endpoints localListeners;
 
-
+    //kraft版本
     private final SupportedVersionRange localSupportedKRaftVersion;
 
-
+    //网络channel，负责向其他node发送outbound请求
     private final NetworkChannel channel;
 
     //本地日志对象
@@ -202,7 +202,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
     private final FuturePurgatory<Long> appendPurgatory;
     private final FuturePurgatory<Long> fetchPurgatory;
 
-    //log写入工具接口
+    //序列化工具
     private final RecordSerde<T> serde;
 
     //内存池
@@ -398,6 +398,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         fetchPurgatory.maybeComplete(endOffsetMetadata.offset(), currentTimeMs);
     }
 
+    //更新log的highwatermark
     private void onUpdateLeaderHighWatermark(
         LeaderState<T> state,
         long currentTimeMs
@@ -806,6 +807,8 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
     ) {
         VoteRequestData request = (VoteRequestData) requestMetadata.data();
 
+
+        //1.1 检查request
         if (!hasValidClusterId(request.clusterId())) {
             return new VoteResponseData().setErrorCode(Errors.INCONSISTENT_CLUSTER_ID.code());
         }
@@ -823,6 +826,8 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
 
         int lastEpoch = partitionRequest.lastOffsetEpoch();
         long lastEpochEndOffset = partitionRequest.lastOffset();
+
+        //1.2 检查请求是否有效
         if (lastEpochEndOffset < 0 || lastEpoch < 0 || lastEpoch >= candidateEpoch) {
             return buildVoteResponse(
                 requestMetadata.listenerName(),
@@ -842,10 +847,12 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             );
         }
 
+        //1.3 如果vote请求的epoch信息，大于当前节点的epoch信息，则转换为unattach状态
         if (candidateEpoch > quorum.epoch()) {
             transitionToUnattached(candidateEpoch);
         }
 
+        //1.3 检查voterkey是否与本地匹配
         // Check that the request was intended for this replica
         Optional<ReplicaKey> voterKey = RaftUtil.voteRequestVoterKey(request, partitionRequest);
         if (!isValidVoterKey(voterKey)) {
@@ -865,20 +872,26 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             );
         }
 
+
+        //2.1 构造OffsetAndEpoch
         OffsetAndEpoch lastEpochEndOffsetAndEpoch = new OffsetAndEpoch(lastEpochEndOffset, lastEpoch);
         ReplicaKey candidateKey = ReplicaKey.of(
             candidateId,
             partitionRequest.candidateDirectoryId()
         );
+
+        //2.2 检查是否可以vote：对比log offset
         boolean voteGranted = quorum.canGrantVote(
             candidateKey,
             lastEpochEndOffsetAndEpoch.compareTo(endOffset()) >= 0
         );
 
+        //2.3 如果可以vote，并且当前节点是unattached状态，则转换为unattached voted状态
         if (voteGranted && quorum.isUnattachedNotVoted()) {
             transitionToUnattachedVoted(candidateKey, candidateEpoch);
         }
 
+        //2.4 成功进行投票
         logger.info("Vote request {} with epoch {} is {}", request, candidateEpoch, voteGranted ? "granted" : "rejected");
         return buildVoteResponse(
             requestMetadata.listenerName(),
@@ -892,6 +905,8 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         RaftResponse.Inbound responseMetadata,
         long currentTimeMs
     ) {
+
+        //1.1 检查响应的数据字段
         int remoteNodeId = responseMetadata.source().id();
         VoteResponseData response = (VoteResponseData) responseMetadata.data();
         Errors topLevelError = Errors.forCode(response.errorCode());
@@ -933,36 +948,44 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             responseMetadata.source(),
             currentTimeMs
         );
+
+
         if (handled.isPresent()) {
             return handled.get();
         } else if (error == Errors.NONE) {
+            //2.1 如果当前节点是leader，直接忽略当前response
             if (quorum.isLeader()) {
                 logger.debug("Ignoring vote response {} since we already became leader for epoch {}",
-                    partitionResponse, quorum.epoch());
+                        partitionResponse, quorum.epoch());
+
+                //2.1 如果为candidate，记录本次投票，并检查是否可以成为leader
             } else if (quorum.isCandidate()) {
                 CandidateState state = quorum.candidateStateOrThrow();
                 if (partitionResponse.voteGranted()) {
                     state.recordGrantedVote(remoteNodeId);
                     maybeTransitionToLeader(state, currentTimeMs);
                 } else {
+                    //2.3 如果不是candidate，记录拒绝投票
                     state.recordRejectedVote(remoteNodeId);
 
                     // If our vote is rejected, we go immediately to the random backoff. This
                     // ensures that we are not stuck waiting for the election timeout when the
                     // vote has become gridlocked.
+
+                    //2.4 如果拒绝投票，则进入随机退避，确保我们不会在选举超时之后被卡住
                     if (state.isVoteRejected() && !state.isBackingOff()) {
                         logger.info("Insufficient remaining votes to become leader (rejected by {}). " +
-                            "We will backoff before retrying election again", state.rejectingVoters());
+                                "We will backoff before retrying election again", state.rejectingVoters());
 
                         state.startBackingOff(
-                            currentTimeMs,
-                            binaryExponentialElectionBackoffMs(state.retries())
+                                currentTimeMs,
+                                binaryExponentialElectionBackoffMs(state.retries())
                         );
                     }
                 }
             } else {
                 logger.debug("Ignoring vote response {} since we are no longer a candidate in epoch {}",
-                    partitionResponse, quorum.epoch());
+                        partitionResponse, quorum.epoch());
             }
             return true;
         } else {
@@ -1021,6 +1044,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
     ) {
         BeginQuorumEpochRequestData request = (BeginQuorumEpochRequestData) requestMetadata.data();
 
+        //1.1 检查请求参数
         if (!hasValidClusterId(request.clusterId())) {
             return new BeginQuorumEpochResponseData().setErrorCode(Errors.INCONSISTENT_CLUSTER_ID.code());
         }
@@ -1030,12 +1054,14 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             return new BeginQuorumEpochResponseData().setErrorCode(Errors.INVALID_REQUEST.code());
         }
 
+        //1.2 获取请求参数
         BeginQuorumEpochRequestData.PartitionData partitionRequest =
             request.topics().get(0).partitions().get(0);
 
         int requestLeaderId = partitionRequest.leaderId();
         int requestEpoch = partitionRequest.leaderEpoch();
 
+        //1.3 检查epoch信息
         Optional<Errors> errorOpt = validateVoterOnlyRequest(requestLeaderId, requestEpoch);
         if (errorOpt.isPresent()) {
             return buildBeginQuorumEpochResponse(
@@ -1053,6 +1079,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             leaderEndpoints = Endpoints.fromBeginQuorumEpochRequest(request.leaderEndpoints());
         }
 
+        //2.1 检查当前node是否需要状态转换
         maybeTransition(
             OptionalInt.of(requestLeaderId),
             requestEpoch,
@@ -1089,6 +1116,8 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         RaftResponse.Inbound responseMetadata,
         long currentTimeMs
     ) {
+
+        //1.1 检查请求参数是否合法
         int remoteNodeId = responseMetadata.source().id();
         BeginQuorumEpochResponseData response = (BeginQuorumEpochResponseData) responseMetadata.data();
         Errors topLevelError = Errors.forCode(response.errorCode());
@@ -1107,6 +1136,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         OptionalInt responseLeaderId = optionalLeaderId(partitionResponse.leaderId());
         int responseEpoch = partitionResponse.leaderEpoch();
 
+        //1.2 通过响应的leaderId，获取endpoint信息
         final Endpoints leaderEndpoints;
         if (responseLeaderId.isPresent()) {
             if (response.nodeEndpoints().isEmpty()) {
@@ -1408,6 +1438,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
     ) {
         FetchRequestData request = (FetchRequestData) requestMetadata.data();
 
+        //1.1 检查参数
         if (!hasValidClusterId(request.clusterId())) {
             return completedFuture(new FetchResponseData().setErrorCode(Errors.INCONSISTENT_CLUSTER_ID.code()));
         }
@@ -1434,10 +1465,14 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             );
         }
 
+
+        //1.2 构造初始的Fetch响应数据
         ReplicaKey replicaKey = ReplicaKey.of(
             FetchRequest.replicaId(request),
             fetchPartition.replicaDirectoryId()
         );
+
+        //1.3 处理fetch请求，并返回response
         FetchResponseData response = tryCompleteFetchRequest(
             requestMetadata.listenerName(),
             requestMetadata.apiVersion(),
@@ -1448,6 +1483,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         FetchResponseData.PartitionData partitionResponse =
             response.responses().get(0).partitions().get(0);
 
+        //1.3 如果满足以下条件，直接返回
         if (partitionResponse.errorCode() != Errors.NONE.code()
             || FetchResponse.recordsSize(partitionResponse) > 0
             || request.maxWaitMs() == 0
@@ -1466,6 +1502,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             fetchPartition.fetchOffset(),
             request.maxWaitMs());
 
+        //2.1 等待异步完成，处理response
         return future.handle((completionTimeMs, exception) -> {
             if (exception != null) {
                 Throwable cause = exception instanceof ExecutionException ?
@@ -1525,6 +1562,8 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         long currentTimeMs
     ) {
         try {
+
+            //1.1 验证请求参数
             Optional<Errors> errorOpt = validateLeaderOnlyRequest(request.currentLeaderEpoch());
             if (errorOpt.isPresent()) {
                 return buildEmptyFetchResponse(listenerName, apiVersion, errorOpt.get(), Optional.empty());
@@ -1534,6 +1573,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             int lastFetchedEpoch = request.lastFetchedEpoch();
             LeaderState<T> state = quorum.leaderStateOrThrow();
 
+            //1.2 检查offset、snapshotId是否有效
             Optional<OffsetAndEpoch> latestSnapshotId = log.latestSnapshotId();
             final ValidOffsetAndEpoch validOffsetAndEpoch;
             if (fetchOffset == 0 && latestSnapshotId.isPresent() && !latestSnapshotId.get().equals(BOOTSTRAP_SNAPSHOT_ID)) {
@@ -1544,6 +1584,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
                 validOffsetAndEpoch = log.validateOffsetAndEpoch(fetchOffset, lastFetchedEpoch);
             }
 
+            //2.1 从fetchOffset读取日志数据
             final Records records;
             if (validOffsetAndEpoch.kind() == ValidOffsetAndEpoch.Kind.VALID) {
                 LogFetchInfo info = log.read(fetchOffset, Isolation.UNCOMMITTED);
@@ -1597,6 +1638,8 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         RaftResponse.Inbound responseMetadata,
         long currentTimeMs
     ) {
+
+        //1.1 检查参数合法性
         FetchResponseData response = (FetchResponseData) responseMetadata.data();
         Errors topLevelError = Errors.forCode(response.errorCode());
         if (topLevelError != Errors.NONE) {
@@ -1612,12 +1655,15 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         FetchResponseData.PartitionData partitionResponse =
             response.responses().get(0).partitions().get(0);
 
+        //1.2 获取leaderId和epoch
         FetchResponseData.LeaderIdAndEpoch currentLeaderIdAndEpoch = partitionResponse.currentLeader();
         OptionalInt responseLeaderId = optionalLeaderId(currentLeaderIdAndEpoch.leaderId());
         int responseEpoch = currentLeaderIdAndEpoch.leaderEpoch();
         Errors error = Errors.forCode(partitionResponse.errorCode());
 
         final Endpoints leaderEndpoints;
+
+        //1.3 根据响应中的leaderId，构造endpoint
         if (responseLeaderId.isPresent()) {
             if (response.nodeEndpoints().isEmpty()) {
                 leaderEndpoints = partitionState.lastVoterSet().listeners(responseLeaderId.getAsInt());
@@ -1632,6 +1678,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             leaderEndpoints = Endpoints.empty();
         }
 
+        //2.1 处理response，检查字段
         Optional<Boolean> handled = maybeHandleCommonResponse(
             error,
             responseLeaderId,
@@ -1647,6 +1694,8 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         FollowerState state = quorum.followerStateOrThrow();
         if (error == Errors.NONE) {
             FetchResponseData.EpochEndOffset divergingEpoch = partitionResponse.divergingEpoch();
+
+            //2.2 检查是否需要截断
             if (divergingEpoch.epoch() >= 0) {
                 // The leader is asking us to truncate before continuing
                 final OffsetAndEpoch divergingOffsetAndEpoch = new OffsetAndEpoch(
@@ -1667,12 +1716,14 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
                     quorum.leaderIdOrSentinel()
                 );
 
+                //2.3 截断旧数据
                 // Update the internal listener to the new end offset
                 partitionState.truncateNewEntries(truncationOffset);
             } else if (partitionResponse.snapshotId().epoch() >= 0 ||
                        partitionResponse.snapshotId().endOffset() >= 0) {
                 // The leader is asking us to fetch a snapshot
 
+                //2.4 检查是否需要写入snapshot
                 if (partitionResponse.snapshotId().epoch() < 0) {
                     logger.error(
                         "The leader sent a snapshot id with a valid end offset {} but with an invalid epoch {}",
@@ -1713,6 +1764,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
                     }
                 }
             } else {
+                //2.5 写入日志records记录，并更新high watermark
                 Records records = FetchResponse.recordsOrFail(partitionResponse);
                 if (records.sizeInBytes() > 0) {
                     appendAsFollower(records);
@@ -2056,11 +2108,11 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         }
         if (snapshot.sizeInBytes() != partitionSnapshot.position()) {
             throw new IllegalStateException(
-                String.format(
-                    "Received fetch snapshot response with an invalid position. Expected %d; Received %d",
-                    snapshot.sizeInBytes(),
-                    partitionSnapshot.position()
-                )
+                    String.format(
+                            "Received fetch snapshot response with an invalid position. Expected %d; Received %d",
+                            snapshot.sizeInBytes(),
+                            partitionSnapshot.position()
+                    )
             );
         }
 
@@ -2444,6 +2496,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         return Optional.empty();
     }
 
+    //检查节点是否需要进行状态转换
     private void maybeTransition(
         OptionalInt leaderId,
         int epoch,
@@ -2873,16 +2926,23 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         LeaderState<T> state,
         long currentTimeMs
     ) {
+        //1.1 计算下次清空accumulator的时间
         long timeUntilDrain = state.accumulator().timeUntilDrain(currentTimeMs);
         if (timeUntilDrain <= 0) {
+
+            //1.2 清空并获取accumulator中的数据
             List<BatchAccumulator.CompletedBatch<T>> batches = state.accumulator().drain();
             Iterator<BatchAccumulator.CompletedBatch<T>> iterator = batches.iterator();
+
 
             try {
                 while (iterator.hasNext()) {
                     BatchAccumulator.CompletedBatch<T> batch = iterator.next();
+                    //2.1 循环处理
                     appendBatch(state, batch, currentTimeMs);
                 }
+
+                //2.2 log信息刷盘
                 flushLeaderLog(state, currentTimeMs);
             } finally {
                 // Release and discard any batches which failed to be appended
@@ -2963,23 +3023,33 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         return Math.min(stateTimeoutMs, endQuorumBackoffMs);
     }
 
+    /**
+     *
+     * @param currentTimeMs
+     * @return
+     */
     private long pollLeader(long currentTimeMs) {
+        //1.1 检查listener，触发leader change事件
         LeaderState<T> state = quorum.leaderStateOrThrow();
         maybeFireLeaderChange(state);
 
+        //1.2 检查是否需要进入resigned状态
         long timeUntilCheckQuorumExpires = state.timeUntilCheckQuorumExpires(currentTimeMs);
         if (shutdown.get() != null || state.isResignRequested() || timeUntilCheckQuorumExpires == 0) {
             transitionToResigned(state.nonLeaderVotersByDescendingFetchOffset());
             return 0L;
         }
 
+        //1.3 计算下一次vote到期时间
         long timeUtilVoterChangeExpires = state.maybeExpirePendingOperation(currentTimeMs);
 
+        //1.4 定期落盘accumulator中的日志数据
         long timeUntilFlush = maybeAppendBatches(
             state,
             currentTimeMs
         );
 
+        //1.5 检查是否需要发送BeginQuorumEpoch请求
         long timeUntilNextBeginQuorumSend = maybeSendBeginQuorumEpochRequests(
             state,
             currentTimeMs
@@ -3028,15 +3098,19 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
         CandidateState state = quorum.candidateStateOrThrow();
         GracefulShutdown shutdown = this.shutdown.get();
 
+        //1.1 检查是否需要shutdown
         if (shutdown != null) {
             // If we happen to shutdown while we are a candidate, we will continue
             // with the current election until one of the following conditions is met:
             //  1) we are elected as leader (which allows us to resign)
             //  2) another leader is elected
             //  3) the shutdown timer expires
+
+            //1.2 正在关闭也需要发送Vote请求
             long minRequestBackoffMs = maybeSendVoteRequests(state, currentTimeMs);
             return Math.min(shutdown.remainingTimeMs(), minRequestBackoffMs);
         } else if (state.isBackingOff()) {
+            //1.3 如果退出选举，继续转换为candidate状态
             if (state.isBackoffComplete(currentTimeMs)) {
                 logger.info("Re-elect as candidate after election backoff has completed");
                 transitionToCandidate(currentTimeMs);
@@ -3044,12 +3118,14 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             }
             return state.remainingBackoffMs(currentTimeMs);
         } else if (state.hasElectionTimeoutExpired(currentTimeMs)) {
+            //1.4 选举超时
             long backoffDurationMs = binaryExponentialElectionBackoffMs(state.retries());
             logger.info("Election has timed out, backing off for {}ms before becoming a candidate again",
                 backoffDurationMs);
             state.startBackingOff(currentTimeMs, backoffDurationMs);
             return backoffDurationMs;
         } else {
+            //检查是否需要发送vote请求
             long minRequestBackoffMs = maybeSendVoteRequests(state, currentTimeMs);
             return Math.min(minRequestBackoffMs, state.remainingElectionTimeMs(currentTimeMs));
         }
@@ -3072,14 +3148,18 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             // skip the transition to candidate in any case.
             backoffMs = 0;
         } else if (state.hasFetchTimeoutExpired(currentTimeMs)) {
+            //1.1 如果fetch超时，转为candidate状态
             logger.info("Become candidate due to fetch timeout");
             transitionToCandidate(currentTimeMs);
             backoffMs = 0;
         } else if (state.hasUpdateVoterPeriodExpired(currentTimeMs)) {
+
+            //1.2 发送UpdateVoter请求
             if (partitionState.lastKraftVersion().isReconfigSupported() &&
                 partitionState.lastVoterSet().voterNodeNeedsUpdate(quorum.localVoterNodeOrThrow())) {
                 backoffMs = maybeSendUpdateVoterRequest(state, currentTimeMs);
             } else {
+                // 1.3 发送Fetch snapshot请求
                 backoffMs = maybeSendFetchOrFetchSnapshot(state, currentTimeMs);
             }
             state.resetUpdateVoterPeriod(currentTimeMs);
@@ -3097,6 +3177,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
     }
 
     private long pollFollowerAsObserver(FollowerState state, long currentTimeMs) {
+        //发送fetch请求
         if (state.hasFetchTimeoutExpired(currentTimeMs)) {
             return maybeSendFetchToAnyBootstrap(currentTimeMs);
         } else {
@@ -3338,13 +3419,18 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             return;
         }
 
+        //1.1 根据不同节点角色，执行对应逻辑
         long pollStateTimeoutMs = pollCurrentState(startPollTimeMs);
+
+        //1.2 定期清理日志snapshot
         long cleaningTimeoutMs = snapshotCleaner.maybeClean(startPollTimeMs);
         long pollTimeoutMs = Math.min(pollStateTimeoutMs, cleaningTimeoutMs);
 
+        //1.3 更新指标
         long startWaitTimeMs = time.milliseconds();
         kafkaRaftMetrics.updatePollStart(startWaitTimeMs);
 
+        //1.4 获取inbound消息并处理
         RaftMessage message = messageQueue.poll(pollTimeoutMs);
 
         long endWaitTimeMs = time.milliseconds();
@@ -3354,6 +3440,7 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             handleInboundMessage(message, endWaitTimeMs);
         }
 
+        //1.5 处理新注册的listener
         pollListeners();
     }
 
@@ -3367,12 +3454,16 @@ public final class KafkaRaftClient<T> implements RaftClient<T> {
             throw new NotLeaderException("Append failed because the replica is not the current leader");
         }
 
+        //获取LeaderState
         LeaderState<T> leaderState = quorum.<T>maybeLeaderState().orElseThrow(
             () -> new NotLeaderException("Append failed because the replica is not the current leader")
         );
 
+        // 获取LeaderState的Accumulator
         BatchAccumulator<T> accumulator = leaderState.accumulator();
         boolean isFirstAppend = accumulator.isEmpty();
+
+        // 调用BatchAccumulator的append方法，将记录添加到Accumulator中，并返回该记录的起始偏移量
         final long offset = accumulator.append(epoch, records, true);
 
         // Wakeup the network channel if either this is the first append

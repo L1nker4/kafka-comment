@@ -135,11 +135,15 @@ public class SnapshotEmitter implements SnapshotGenerator.Emitter {
 
     @Override
     public void maybeEmit(MetadataImage image) {
+
+        //1.1 调用createSnapshot方法进行创建
         MetadataProvenance provenance = image.provenance();
         Optional<SnapshotWriter<ApiMessageAndVersion>> snapshotWriter = raftClient.createSnapshot(
             provenance.snapshotId(),
             provenance.lastContainedLogTimeMs()
         );
+
+        //1.2 check
         if (!snapshotWriter.isPresent()) {
             log.error("Not generating {} because it already exists.", provenance.snapshotName());
             return;

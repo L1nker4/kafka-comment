@@ -138,7 +138,7 @@ public final class KRaftControlRecordStateMachine {
      */
     public VoterSet lastVoterSet() {
         synchronized (voterSetHistory) {
-            return voterSetHistory.lastValue();
+                return voterSetHistory.lastValue();
         }
     }
 

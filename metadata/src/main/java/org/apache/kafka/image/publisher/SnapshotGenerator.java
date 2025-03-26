@@ -239,8 +239,14 @@ public class SnapshotGenerator implements MetadataPublisher {
         MetadataImage newImage,
         LogDeltaManifest manifest
     ) {
+
+        //1.1 更新bytesSinceLastSnapshot
         bytesSinceLastSnapshot += manifest.numBytes();
+
+        //1.2 检查当前写入bytes是否大于配置项
         if (bytesSinceLastSnapshot >= maxBytesSinceLastSnapshot) {
+
+            //1.3 如果queue为空，立即触发生成snapshot
             if (eventQueue.isEmpty()) {
                 scheduleEmit("we have replayed at least " + maxBytesSinceLastSnapshot +
                     " bytes", newImage);
@@ -249,6 +255,8 @@ public class SnapshotGenerator implements MetadataPublisher {
             }
         } else if (maxTimeSinceLastSnapshotNs != 0 &&
                 (time.nanoseconds() - lastSnapshotTimeNs >= maxTimeSinceLastSnapshotNs)) {
+
+            //2.1 如果time条件满足也会触发生成snapshot
             if (eventQueue.isEmpty()) {
                 scheduleEmit("we have waited at least " +
                     TimeUnit.NANOSECONDS.toMinutes(maxTimeSinceLastSnapshotNs) + " minute(s)", newImage);
@@ -264,14 +272,18 @@ public class SnapshotGenerator implements MetadataPublisher {
         String reason,
         MetadataImage image
     ) {
+        //1.1 重置counter
         resetSnapshotCounters();
         eventQueue.append(() -> {
+            //1.2 检查是否禁用snapshot
             String currentDisabledReason = disabledReason.get();
             if (currentDisabledReason != null) {
                 log.error("Not emitting {} despite the fact that {} because snapshots are " +
                     "disabled; {}", image.provenance().snapshotName(), reason,
                         currentDisabledReason);
             } else {
+
+                //2.1 触发创建snapshot
                 log.info("Creating new KRaft snapshot file {} because {}.",
                         image.provenance().snapshotName(), reason);
                 try {

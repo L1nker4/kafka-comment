@@ -80,19 +80,39 @@ import java.util.Random;
  *
  */
 public class QuorumState {
+
+    //节点id
     private final OptionalInt localId;
+
+    //目录id
     private final Uuid localDirectoryId;
     private final Time time;
     private final Logger log;
+
+    //用于选举信息存储，JSON格式
     private final QuorumStateStore store;
+
+    //kraft状态机
     private final KRaftControlRecordStateMachine partitionState;
+
+    //各个listener endpoint节点信息
     private final Endpoints localListeners;
+
+    //kraft版本信息
     private final SupportedVersionRange localSupportedKRaftVersion;
+
     private final Random random;
+
+    //选举超时时间
     private final int electionTimeoutMs;
+
+    //fetch超时时间
     private final int fetchTimeoutMs;
+
+    //日志上下文
     private final LogContext logContext;
 
+    //节点状态对象
     private volatile EpochState state;
 
     public QuorumState(
@@ -567,6 +587,7 @@ public class QuorumState {
     }
 
     public <T> LeaderState<T> transitionToLeader(long epochStartOffset, BatchAccumulator<T> accumulator) {
+        //1.1 如果是observer或不是candidate，则抛出异常
         if (isObserver()) {
             throw new IllegalStateException(
                 String.format(
@@ -581,6 +602,7 @@ public class QuorumState {
             throw new IllegalStateException("Cannot transition to Leader from current state " + state);
         }
 
+        //1.2 获取candidateState
         CandidateState candidateState = candidateStateOrThrow();
         if (!candidateState.isVoteGranted())
             throw new IllegalStateException("Cannot become leader without majority votes granted");
@@ -596,6 +618,8 @@ public class QuorumState {
         // could address this problem by decoupling the local high watermark, but
         // we typically expect the state machine to be caught up anyway.
 
+
+        //2.1 创建LeaderState对象
         LeaderState<T> state = new LeaderState<>(
             time,
             ReplicaKey.of(localIdOrThrow(), localDirectoryId),
@@ -610,13 +634,17 @@ public class QuorumState {
             fetchTimeoutMs,
             logContext
         );
+
+        //2.2 更新
         durableTransitionTo(state);
         return state;
     }
 
     private void durableTransitionTo(EpochState newState) {
         log.info("Attempting durable transition to {} from {}", newState, state);
+        //写入文件
         store.writeElectionState(newState.election(), partitionState.lastKraftVersion());
+        //更新内存
         memoryTransitionTo(newState);
     }
 
