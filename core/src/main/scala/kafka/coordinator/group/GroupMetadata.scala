@@ -176,7 +176,9 @@ case class GroupSummary(state: String,
   * information of the commit record offset, compaction of the offsets topic itself may result in the wrong offset commit
   * being materialized.
   */
-case class CommitRecordMetadataAndOffset(appendedBatchOffset: Option[Long], offsetAndMetadata: OffsetAndMetadata) {
+case class CommitRecordMetadataAndOffset(appendedBatchOffset: Option[Long], //位移主题消息自己的offset
+                                         offsetAndMetadata: OffsetAndMetadata //位移提交消息中保存的消费者组的offset
+                                        ) {
   def olderThan(that: CommitRecordMetadataAndOffset): Boolean = appendedBatchOffset.get < that.appendedBatchOffset.get
 }
 
@@ -199,20 +201,33 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   private[group] val lock = new ReentrantLock
 
+  //group 状态
   private var state: GroupState = initialState
+
+  //记录状态最近一次变更的时间戳
   var currentStateTimestamp: Option[Long] = Some(time.milliseconds())
   var protocolType: Option[String] = None
   var protocolName: Option[String] = None
   var generationId = 0
+
+  //记录消费者组的leaderId
   private var leaderId: Option[String] = None
 
+  //成员metadata map
   private val members = new mutable.HashMap[String, MemberMetadata]
+
   // Static membership mapping [key: group.instance.id, value: member.id]
   private val staticMembers = new mutable.HashMap[String, String]
+
+  //等待加入的成员集合
   private val pendingMembers = new mutable.HashSet[String]
   private var numMembersAwaitingJoin = 0
   private val supportedProtocols = new mutable.HashMap[String, Integer]().withDefaultValue(0)
+
+  //消费者组订阅分区的提交offset
   private val offsets = new mutable.HashMap[TopicPartition, CommitRecordMetadataAndOffset]
+
+  //待提交的offset集合
   private val pendingOffsetCommits = new mutable.HashMap[TopicPartition, OffsetAndMetadata]
   private val pendingTransactionalOffsetCommits = new mutable.HashMap[Long, mutable.Map[TopicPartition, CommitRecordMetadataAndOffset]]()
   private var receivedTransactionalOffsetCommits = false
@@ -221,6 +236,8 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   // When protocolType == `consumer`, a set of subscribed topics is maintained. The set is
   // computed when a new generation is created or when the group is restored from the log.
+
+  //订阅的topic集合
   private var subscribedTopics: Option[Set[String]] = None
 
   var newMemberAdded: Boolean = false
@@ -246,37 +263,51 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
       staticMembers.put(instanceId, member.memberId)
     }
 
-    if (members.isEmpty)
+    //1.1 如果是第一个加入的
+    if (members.isEmpty) {
+      //1.2 将group的protocolType设置为member的protocolType
       this.protocolType = Some(member.protocolType)
+    }
 
+    //1.2 确保group的protocolType与member的protocolType一致，并且group的protocolType与member的supportedProtocols中包含的协议一致
     assert(this.protocolType.orNull == member.protocolType)
     assert(supportsProtocols(member.protocolType, MemberMetadata.plainProtocolSet(member.supportedProtocols)))
 
+    //1.3 如果leaderId为空，则将leaderId设置为member的memberId
     if (leaderId.isEmpty)
       leaderId = Some(member.memberId)
 
+    //1.4 将member加入到members集合中
     members.put(member.memberId, member)
     incSupportedProtocols(member)
     member.awaitingJoinCallback = callback
 
+    //1.5 更新numMembersAwaitingJoin
     if (member.isAwaitingJoin)
       numMembersAwaitingJoin += 1
 
+    //1.6 添加完成，将memberId从pendingMembers集合中移除
     pendingMembers.remove(member.memberId)
   }
 
   def remove(memberId: String): Unit = {
+    //1.1 从members中移除
     members.remove(memberId).foreach { member =>
+      //1.2 减少supportedProtocols中的指定member
       decSupportedProtocols(member)
+
+      //1.3 如果member是等待加入的，则减少numMembersAwaitingJoin
       if (member.isAwaitingJoin)
         numMembersAwaitingJoin -= 1
 
       member.groupInstanceId.foreach(staticMembers.remove)
     }
 
+    //2.1 如果member是leader，则leaderId设置剩余成员的第一个
     if (isLeader(memberId))
       leaderId = members.keys.headOption
 
+    //2.2 从pendingMembers集合中移除
     pendingMembers.remove(memberId)
     pendingSyncMembers.remove(memberId)
   }
@@ -624,14 +655,19 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
 
   def onOffsetCommitAppend(topicIdPartition: TopicIdPartition, offsetWithCommitRecordMetadata: CommitRecordMetadataAndOffset): Unit = {
     val topicPartition = topicIdPartition.topicPartition
+
+    //1.1 检查pendingOffsetCommits中是否已有该partition
     if (pendingOffsetCommits.contains(topicPartition)) {
       if (offsetWithCommitRecordMetadata.appendedBatchOffset.isEmpty)
         throw new IllegalStateException("Cannot complete offset commit write without providing the metadata of the record " +
           "in the log.")
+
+      //1.2 如果offsets中已有，或者已有的offset小于等于offsetWithCommitRecordMetadata，则更新offsets
       if (!offsets.contains(topicPartition) || offsets(topicPartition).olderThan(offsetWithCommitRecordMetadata))
         offsets.put(topicPartition, offsetWithCommitRecordMetadata)
     }
 
+    //从pendingOffsetCommits移除该topicPartition
     pendingOffsetCommits.get(topicPartition) match {
       case Some(stagedOffset) if offsetWithCommitRecordMetadata.offsetAndMetadata == stagedOffset =>
         pendingOffsetCommits.remove(topicPartition)
@@ -759,6 +795,11 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     def getExpiredOffsets(baseTimestamp: CommitRecordMetadataAndOffset => Long,
                           subscribedTopics: Set[String] = Set.empty): Map[TopicPartition, OffsetAndMetadata] = {
       offsets.filter {
+        //1.1 筛选满足以下条件的分区
+
+        //1. 分布不属于当前消费者组订阅范围
+        //2. 分区已经完成offset提交
+        //3. 分区在位移提交offset中的存在时间超过了配置阈值
         case (topicPartition, commitRecordMetadataAndOffset) =>
           !subscribedTopics.contains(topicPartition.topic()) &&
           !pendingOffsetCommits.contains(topicPartition) && {
@@ -777,7 +818,9 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
       }.toMap
     }
 
+    //1.1 根据protocolType情况，获取过期offset消息
     val expiredOffsets: Map[TopicPartition, OffsetAndMetadata] = protocolType match {
+
       case Some(_) if is(Empty) =>
         // no consumer exists in the group =>
         // - if current state timestamp exists and retention period has passed since group became Empty,
@@ -811,6 +854,8 @@ private[group] class GroupMetadata(val groupId: String, initialState: GroupState
     if (expiredOffsets.nonEmpty)
       debug(s"Expired offsets from group '$groupId': ${expiredOffsets.keySet}")
 
+
+    //2.1 从缓存中移除过期的offset消息
     offsets --= expiredOffsets.keySet
     expiredOffsets
   }

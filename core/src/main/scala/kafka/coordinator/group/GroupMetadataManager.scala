@@ -56,17 +56,19 @@ import scala.collection._
 import scala.collection.mutable.ArrayBuffer
 import scala.jdk.CollectionConverters._
 
-class GroupMetadataManager(brokerId: Int,
-                           interBrokerProtocolVersion: MetadataVersion,
-                           config: OffsetConfig,
-                           val replicaManager: ReplicaManager,
+class GroupMetadataManager(brokerId: Int,       //broker id
+                           interBrokerProtocolVersion: MetadataVersion, //配置项inter.broker.protocol.version
+                           config: OffsetConfig,            //位移主题配置类
+                           val replicaManager: ReplicaManager,  //副本管理器
                            time: Time,
                            metrics: Metrics) extends Logging {
   // Visible for test.
   private[group] val metricsGroup: KafkaMetricsGroup = new KafkaMetricsGroup(this.getClass)
 
+  //压缩器类型，用于写入位移主题写入时执行压缩操作
   private val compression: Compression = Compression.of(config.offsetsTopicCompressionType).build()
 
+  //消费者组metadata存储容器，key为group id，value为GroupMetadata
   private val groupMetadataCache = new Pool[String, GroupMetadata]
 
   /* lock protecting access to loading and owned partition sets */
@@ -259,6 +261,7 @@ class GroupMetadataManager(brokerId: Int,
         val key = GroupMetadataManager.groupMetadataKey(group.groupId)
         val value = GroupMetadataManager.groupMetadataValue(group, groupAssignment, interBrokerProtocolVersion)
 
+        // 将group信息转换为records
         val records = {
           val buffer = ByteBuffer.allocate(AbstractRecords.estimateSizeInBytes(magicValue, compression.`type`(),
             Seq(new SimpleRecord(timestamp, key, value)).asJava))
@@ -451,23 +454,28 @@ class GroupMetadataManager(brokerId: Int,
    * This method should be called under the group lock to ensure validations and updates are all performed
    * atomically.
    */
-  def storeOffsets(group: GroupMetadata,
-                   consumerId: String,
-                   offsetTopicPartition: TopicPartition,
-                   offsetMetadata: immutable.Map[TopicIdPartition, OffsetAndMetadata],
-                   responseCallback: immutable.Map[TopicIdPartition, Errors] => Unit,
-                   producerId: Long = RecordBatch.NO_PRODUCER_ID,
-                   producerEpoch: Short = RecordBatch.NO_PRODUCER_EPOCH,
-                   requestLocal: RequestLocal = RequestLocal.NoCaching,
+  def storeOffsets(group: GroupMetadata,          //消费者组元数据
+                   consumerId: String,            //消费者id
+                   offsetTopicPartition: TopicPartition,      //消费offset对应的topic partition
+                   offsetMetadata: immutable.Map[TopicIdPartition, OffsetAndMetadata],      //需要保存的消费offset数据
+                   responseCallback: immutable.Map[TopicIdPartition, Errors] => Unit,     //callback
+                   producerId: Long = RecordBatch.NO_PRODUCER_ID,                 //事务型消息的producerId
+                   producerEpoch: Short = RecordBatch.NO_PRODUCER_EPOCH,          //事务型消息的producerEpoch
+                   requestLocal: RequestLocal = RequestLocal.NoCaching,           //request thread local
                    verificationGuard: Option[VerificationGuard]): Unit = {
+
+    //1.1 检查group是否接收消费offset消息
     if (!group.hasReceivedConsistentOffsetCommits)
       warn(s"group: ${group.groupId} with leader: ${group.leaderOrNull} has received offset commits from consumers as well " +
         s"as transactional producers. Mixing both types of offset commits will generally result in surprises and " +
         s"should be avoided.")
 
+    //1.2 检查消费offset数据是否超过最大长度
     val filteredOffsetMetadata = offsetMetadata.filter { case (_, offsetAndMetadata) =>
       validateOffsetMetadataLength(offsetAndMetadata.metadata)
     }
+
+    //1.3 如果不合法，返回错误
     if (filteredOffsetMetadata.isEmpty) {
       // compute the final error codes for the commit response
       val commitStatus = offsetMetadata.map { case (k, _) => k -> Errors.OFFSET_METADATA_TOO_LARGE }
@@ -475,6 +483,7 @@ class GroupMetadataManager(brokerId: Int,
       return
     }
 
+    //1.4 获取消费位移topic的magic version，检查是否为coordinator
     val magicOpt = getMagic(partitionFor(group.groupId))
     if (magicOpt.isEmpty) {
       val commitStatus = offsetMetadata.map { case (topicIdPartition, _) =>
@@ -485,11 +494,14 @@ class GroupMetadataManager(brokerId: Int,
     }
 
     val isTxnOffsetCommit = producerId != RecordBatch.NO_PRODUCER_ID
+
+    //2.1 构造需要写入的records
     val records = generateOffsetRecords(magicOpt.get, isTxnOffsetCommit, group.groupId, offsetTopicPartition, filteredOffsetMetadata, producerId, producerEpoch)
     val putCacheCallback = createPutCacheCallback(isTxnOffsetCommit, group, consumerId, offsetMetadata, filteredOffsetMetadata, responseCallback, producerId, records)
 
     val verificationGuards = verificationGuard.map(guard => offsetTopicPartition -> guard).toMap
 
+    //2.2 检查是否为事务提交
     if (isTxnOffsetCommit) {
       addProducerGroup(producerId, group.groupId)
       group.prepareTxnOffsetCommit(producerId, filteredOffsetMetadata)
@@ -497,6 +509,7 @@ class GroupMetadataManager(brokerId: Int,
       group.prepareOffsetCommit(filteredOffsetMetadata)
     }
 
+    //2.3 写入消息
     appendForGroup(group, records, requestLocal, putCacheCallback, verificationGuards)
   }
 
@@ -591,14 +604,26 @@ class GroupMetadataManager(brokerId: Int,
   private def doLoadGroupsAndOffsets(topicPartition: TopicPartition, onGroupLoaded: GroupMetadata => Unit): Unit = {
     def logEndOffset: Long = replicaManager.getLogEndOffset(topicPartition).getOrElse(-1L)
 
+    //1.1 通过replicaManager 获取log
     replicaManager.getLog(topicPartition) match {
+
+      //2.1 获取log失败的情况
       case None =>
         warn(s"Attempted to load offsets and group metadata from $topicPartition, but found no log")
 
+      //2.2 获取log成功的情况
       case Some(log) =>
+
+        //已完成offset信息加载的部分
         val loadedOffsets = mutable.Map[GroupTopicPartition, CommitRecordMetadataAndOffset]()
+
+        //正在加载offset信息的部分
         val pendingOffsets = mutable.Map[Long, mutable.Map[GroupTopicPartition, CommitRecordMetadataAndOffset]]()
+
+        //已完成group信息加载的部分
         val loadedGroups = mutable.Map[String, GroupMetadata]()
+
+        //待移除的group信息
         val removedGroups = mutable.Set[String]()
 
         // buffer may not be needed if records are read from memory
@@ -610,7 +635,10 @@ class GroupMetadataManager(brokerId: Int,
         // loop breaks if no records have been read, since the end of the log has been reached
         var readAtLeastOneRecord = true
 
+        //3.1 循环offset读取消息
         while (currOffset < logEndOffset && readAtLeastOneRecord && !shuttingDown.get()) {
+
+          //3.2 从currOffset开始读
           val fetchDataInfo = log.read(currOffset,
             maxLength = config.loadBufferSize,
             isolation = FetchIsolation.LOG_END,
@@ -619,7 +647,10 @@ class GroupMetadataManager(brokerId: Int,
           readAtLeastOneRecord = fetchDataInfo.records.sizeInBytes > 0
 
           val memRecords = (fetchDataInfo.records: @unchecked) match {
+            //3.3 如果是MemoryRecords内存记录，直接返回
             case records: MemoryRecords => records
+
+            //3.4 如果是FileRecords文件记录，则将其转换为MemoryRecords
             case fileRecords: FileRecords =>
               val sizeInBytes = fileRecords.sizeInBytes
               val bytesNeeded = Math.max(config.loadBufferSize, sizeInBytes)
@@ -641,6 +672,8 @@ class GroupMetadataManager(brokerId: Int,
 
           memRecords.batches.forEach { batch =>
             val isTxnOffsetCommit = batch.isTransactional
+
+            //4.1 是否为控制类消息（事务）
             if (batch.isControlBatch) {
               val recordIterator = batch.iterator
               if (recordIterator.hasNext) {
@@ -657,18 +690,27 @@ class GroupMetadataManager(brokerId: Int,
                 pendingOffsets.remove(batch.producerId)
               }
             } else {
+              //4.2 报错消息batch的第一条消息的offset
               var batchBaseOffset: Option[Long] = None
+
+              //4.3 遍历消息batch的每条消息
               for (record <- batch.asScala) {
                 require(record.hasKey, "Group metadata/offset entry key should not be null")
                 if (batchBaseOffset.isEmpty)
                   batchBaseOffset = Some(record.offset)
+
+                //4.4 确保消息的key是OffsetKey或GroupMetadataKey
                 GroupMetadataManager.readMessageKey(record.key) match {
+
+                  //4.5 如果是OffsetKey，说明是位移提交消息
                   case offsetKey: OffsetKey =>
                     if (isTxnOffsetCommit && !pendingOffsets.contains(batch.producerId))
                       pendingOffsets.put(batch.producerId, mutable.Map[GroupTopicPartition, CommitRecordMetadataAndOffset]())
 
                     // load offset
                     val groupTopicPartition = offsetKey.key
+
+                    //4.6 检查是否为空
                     if (!record.hasValue) {
                       if (isTxnOffsetCommit)
                         pendingOffsets(batch.producerId).remove(groupTopicPartition)
@@ -682,6 +724,7 @@ class GroupMetadataManager(brokerId: Int,
                         loadedOffsets.put(groupTopicPartition, CommitRecordMetadataAndOffset(batchBaseOffset, offsetAndMetadata))
                     }
 
+                    //4.7 如果是GroupMetadataKey注册消息
                   case groupMetadataKey: GroupMetadataKey =>
                     // load group metadata
                     val groupId = groupMetadataKey.key

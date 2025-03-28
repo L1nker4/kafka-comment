@@ -57,14 +57,16 @@ private[group] class MemberMetadata(var memberId: String,
                                     val groupInstanceId: Option[String],
                                     val clientId: String,
                                     val clientHost: String,
-                                    var rebalanceTimeoutMs: Int,
-                                    var sessionTimeoutMs: Int,
-                                    val protocolType: String,
-                                    var supportedProtocols: List[(String, Array[Byte])],
-                                    var assignment: Array[Byte] = Array.empty[Byte]) {
+                                    var rebalanceTimeoutMs: Int,      //rebalance超时时间
+                                    var sessionTimeoutMs: Int,        //会话超时时间
+                                    val protocolType: String,         //协议类型
+                                    var supportedProtocols: List[(String, Array[Byte])], //成员配置的多个分区策略，配置项partition.assignment.strategy
+                                    var assignment: Array[Byte] = Array.empty[Byte]) { //当前成员的分区分配策略
+
 
   var awaitingJoinCallback: JoinGroupResult => Unit = _
   var awaitingSyncCallback: SyncGroupResult => Unit = _
+  //是否为消费者组的新成员
   var isNew: Boolean = false
 
   def isStaticMember: Boolean = groupInstanceId.isDefined
