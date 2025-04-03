@@ -111,9 +111,12 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
                            responseCallback: InitProducerIdCallback,
                            requestLocal: RequestLocal = RequestLocal.NoCaching): Unit = {
 
+    //1.1 检查传入的transactionalId是否为空
     if (transactionalId == null) {
       // if the transactional id is null, then always blindly accept the request
       // and return a new producerId from the producerId manager
+
+      //1.2 生成新的producerId
       producerIdManager.generateProducerId() match {
         case Success(producerId) =>
           responseCallback(InitProducerIdResult(producerId, producerEpoch = 0, Errors.NONE))
@@ -128,8 +131,10 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
       // check transactionTimeoutMs is not larger than the broker configured maximum allowed value
       responseCallback(initTransactionError(Errors.INVALID_TRANSACTION_TIMEOUT))
     } else {
+      //2.1 检查是否存在该transactionalId对应的事务信息
       val coordinatorEpochAndMetadata = txnManager.getTransactionState(transactionalId).flatMap {
         case None =>
+          //2.2 如果不存在事务信息，生成新的producerId，并更新事务信息到metadata
           producerIdManager.generateProducerId() match {
             case Success(producerId) =>
               val createdMetadata = new TransactionMetadata(transactionalId = transactionalId,
@@ -155,6 +160,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
           val coordinatorEpoch = existingEpochAndMetadata.coordinatorEpoch
           val txnMetadata = existingEpochAndMetadata.transactionMetadata
 
+          //3.1 调用prepareInitProducerIdTransit方法，初始化事务
           txnMetadata.inLock {
             prepareInitProducerIdTransit(transactionalId, transactionTimeoutMs, coordinatorEpoch, txnMetadata,
               expectedProducerIdAndEpoch)
@@ -166,6 +172,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
           responseCallback(initTransactionError(error))
 
         case Right((coordinatorEpoch, newMetadata)) =>
+          //4.1 如果当前事务状态为PrepareEpochFence，说明事务已经被新的producer使用，直接返回error
           if (newMetadata.txnState == PrepareEpochFence) {
             // abort the ongoing transaction and then return CONCURRENT_TRANSACTIONS to let client wait and retry
             def sendRetriableErrorCallback(error: Errors): Unit = {
@@ -176,6 +183,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
               }
             }
 
+            //4.2 结束当前事务
             endTransaction(transactionalId,
               newMetadata.producerId,
               newMetadata.producerEpoch,
@@ -196,6 +204,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
               }
             }
 
+            //5.1 提交事务信息到事务日志
             txnManager.appendTransactionToLog(transactionalId, coordinatorEpoch, newMetadata,
               sendPidResponseCallback, requestLocal = requestLocal)
           }
@@ -209,6 +218,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
                                            txnMetadata: TransactionMetadata,
                                            expectedProducerIdAndEpoch: Option[ProducerIdAndEpoch]): ApiResult[(Int, TxnTransitMetadata)] = {
 
+    //检查producerId是否合法
     def isValidProducerId(producerIdAndEpoch: ProducerIdAndEpoch): Boolean = {
       // If a producer ID and epoch are provided by the request, fence the producer unless one of the following is true:
       //   1. The producer epoch is equal to -1, which implies that the metadata was just created. This is the case of a
@@ -421,6 +431,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
               // this is an optimization: if the partitions are already in the metadata reply OK immediately
               Left(Errors.NONE)
             } else {
+              //1.1 将partitions数据写入到元数据
               Right(coordinatorEpoch, txnMetadata.prepareAddPartitions(partitions.toSet, time.milliseconds()))
             }
           }
@@ -431,6 +442,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
           debug(s"Returning $err error code to client for $transactionalId's AddPartitions request")
           responseCallback(err)
 
+          //2.1 将事务信息写入事务日志中
         case Right((coordinatorEpoch, newMetadata)) =>
           txnManager.appendTransactionToLog(transactionalId, coordinatorEpoch, newMetadata,
             responseCallback, requestLocal = requestLocal)
@@ -516,6 +528,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
           val txnMetadata = epochAndTxnMetadata.transactionMetadata
           val coordinatorEpoch = epochAndTxnMetadata.coordinatorEpoch
 
+          //1.1 更新事务状态
           txnMetadata.inLock {
             if (txnMetadata.producerId != producerId)
               Left(Errors.INVALID_PRODUCER_ID_MAPPING)
@@ -579,6 +592,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
           responseCallback(err)
 
         case Right((coordinatorEpoch, newMetadata)) =>
+
           def sendTxnMarkersCallback(error: Errors): Unit = {
             if (error == Errors.NONE) {
               val preSendResult: ApiResult[(TransactionMetadata, TxnTransitMetadata)] = txnManager.getTransactionState(transactionalId).flatMap {
@@ -636,6 +650,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
                   // the log append was successful
                   responseCallback(Errors.NONE)
 
+                  //2.1 向TopicPartition的leader endpoint发送WriteTxnMarkerRequest
                   txnMarkerChannelManager.addTxnMarkersToSend(coordinatorEpoch, txnMarkerResult, txnMetadata, newPreSendMetadata)
               }
             } else {
@@ -661,6 +676,7 @@ class TransactionCoordinator(txnConfig: TransactionConfig,
               responseCallback(error)
             }
           }
+
 
           txnManager.appendTransactionToLog(transactionalId, coordinatorEpoch, newMetadata,
             sendTxnMarkersCallback, requestLocal = requestLocal)

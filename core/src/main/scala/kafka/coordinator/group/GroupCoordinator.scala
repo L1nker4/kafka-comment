@@ -896,7 +896,7 @@ private[group] class GroupCoordinator(
         responseCallback(error)
       return
     }
-
+    //
     val err = groupManager.getGroup(groupId) match {
       case None =>
         Errors.UNKNOWN_MEMBER_ID
@@ -954,12 +954,16 @@ private[group] class GroupCoordinator(
                              requestLocal: RequestLocal = RequestLocal.NoCaching,
                              apiVersion: Short): Unit = {
     validateGroupStatus(groupId, ApiKeys.TXN_OFFSET_COMMIT) match {
+
+      //1.1 验证消费者组的状态
       case Some(error) => responseCallback(offsetMetadata.map { case (k, _) => k -> error })
       case None =>
+        //1.2 获取消费者组信息
         val group = groupManager.getGroup(groupId).getOrElse {
           groupManager.addGroup(new GroupMetadata(groupId, Empty, time))
         }
 
+        //1.3 获取偏移主题分区信息
         val offsetTopicPartition = new TopicPartition(Topic.GROUP_METADATA_TOPIC_NAME, partitionFor(group.groupId))
 
         def postVerificationCallback(
@@ -971,11 +975,16 @@ private[group] class GroupCoordinator(
             val finalError = GroupMetadataManager.maybeConvertOffsetCommitError(error)
             responseCallback(offsetMetadata.map { case (k, _) => k -> finalError })
           } else {
+
+            //2.1 存储事务提交偏移
             doTxnCommitOffsets(group, memberId, groupInstanceId, generationId, producerId, producerEpoch,
               offsetTopicPartition, offsetMetadata, newRequestLocal, responseCallback, Some(verificationGuard))
           }
         }
+
         val transactionSupportedOperation = if (apiVersion >= 4) genericError else defaultError
+
+        //3.1 检查topicPartition是否支持事务性写入
         groupManager.replicaManager.maybeStartTransactionVerificationForPartition(
           topicPartition = offsetTopicPartition,
           transactionalId,
