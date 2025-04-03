@@ -710,7 +710,7 @@ class GroupMetadataManager(brokerId: Int,       //broker id
                     // load offset
                     val groupTopicPartition = offsetKey.key
 
-                    //4.6 检查是否为空
+                    //4.6 检查是否为空，加入到loadedOffsets中
                     if (!record.hasValue) {
                       if (isTxnOffsetCommit)
                         pendingOffsets(batch.producerId).remove(groupTopicPartition)
@@ -748,12 +748,16 @@ class GroupMetadataManager(brokerId: Int,       //broker id
           }
         }
 
+        //5.1 处理loadedOffsets，将loadedOffsets中按照有无组名进行分组
         val (groupOffsets, emptyGroupOffsets) = loadedOffsets
           .groupBy(_._1.group)
           .map { case (k, v) =>
+            //5.2 提取出<组名，主题名，分区号>与位移值对
             k -> v.map { case (groupTopicPartition, offset) => (groupTopicPartition.topicPartition, offset) }
           }.partition { case (group, _) => loadedGroups.contains(group) }
 
+
+        //5.3 pendingOffsets按照组名分组
         val pendingOffsetsByGroup = mutable.Map[String, mutable.Map[Long, mutable.Map[TopicPartition, CommitRecordMetadataAndOffset]]]()
         pendingOffsets.forKeyValue { (producerId, producerOffsets) =>
           producerOffsets.keySet.map(_.group).foreach(addProducerGroup(producerId, _))
@@ -768,6 +772,7 @@ class GroupMetadataManager(brokerId: Int,       //broker id
             }
         }
 
+        //5.4 加载组信息和提交信息
         val (pendingGroupOffsets, pendingEmptyGroupOffsets) = pendingOffsetsByGroup
           .partition { case (group, _) => loadedGroups.contains(group)}
 
@@ -790,6 +795,7 @@ class GroupMetadataManager(brokerId: Int,       //broker id
           onGroupLoaded(group)
         }
 
+        //5.5 检查removedGroups中的所有消费者组，确保它们不能出现在消费者组元数据缓存中，否则将抛出异常
         removedGroups.foreach { groupId =>
           // if the cache already contains a group which should be removed, raise an error. Note that it
           // is possible (however unlikely) for a consumer group to be removed, and then to be used only for

@@ -149,7 +149,7 @@ private[group] class GroupCoordinator(
       // 2) using the number of awaiting members allows to kick out the last rejoining
       //    members of the group.
 
-      //1.2 如果group准备rebalance，满足以下条件允许等待
+      //1.2 如果group正在rebalance，满足以下条件允许等待
       case PreparingRebalance =>
         (group.has(member) && group.get(member).isAwaitingJoin) ||
           group.numAwaiting < groupConfig.groupMaxSize
@@ -158,7 +158,7 @@ private[group] class GroupCoordinator(
       // Note that the group size is used here. When the group transitions to CompletingRebalance,
       // members which haven't rejoined are removed.
 
-      //1.3 如果正在完成rebalance，并且group成员未满，允许加入
+      //1.3 如果正在等待consumber leader返回分配方案，并且group成员未满，允许加入
       case CompletingRebalance | Stable =>
         group.has(member) || group.size < groupConfig.groupMaxSize
     }
@@ -207,7 +207,7 @@ private[group] class GroupCoordinator(
               group.remove(memberId)
               responseCallback(JoinGroupResult(JoinGroupRequest.UNKNOWN_MEMBER_ID, Errors.GROUP_MAX_SIZE_REACHED))
             } else if (isUnknownMember) {
-              //2.3 如果memberId为UNKNOWN_MEMBER_ID，则创建一个member
+              //2.3 如果memberId为UNKNOWN_MEMBER_ID，则调用doNewMemberJoinGroup完成加入
               doNewMemberJoinGroup(
                 group,
                 groupInstanceId,
@@ -240,6 +240,7 @@ private[group] class GroupCoordinator(
               )
             }
 
+            //2.5 如果group正在rebalance，添加延时任务
             // attempt to complete JoinGroup
             if (group.is(PreparingRebalance)) {
               rebalancePurgatory.checkAndComplete(GroupJoinKey(group.groupId))
@@ -265,6 +266,7 @@ private[group] class GroupCoordinator(
     reason: String
   ): Unit = {
     group.inLock {
+      //1.1 检查group状态是否为Dead
       if (group.is(Dead)) {
         // if the group is marked as dead, it means some other thread has just removed the group
         // from the coordinator metadata; it is likely that the group has migrated to some other
@@ -272,10 +274,13 @@ private[group] class GroupCoordinator(
         // finding the correct coordinator and rejoin.
         responseCallback(JoinGroupResult(JoinGroupRequest.UNKNOWN_MEMBER_ID, Errors.COORDINATOR_NOT_AVAILABLE))
       } else if (!group.supportsProtocols(protocolType, MemberMetadata.plainProtocolSet(protocols))) {
+        //1.2 检查group是否支持该协议
         responseCallback(JoinGroupResult(JoinGroupRequest.UNKNOWN_MEMBER_ID, Errors.INCONSISTENT_GROUP_PROTOCOL))
       } else {
+        //1.3 没有memberId，使用UUID进行生成
         val newMemberId = group.generateMemberId(clientId, groupInstanceId)
         groupInstanceId match {
+          //1.4 区分静态、动态成员
           case Some(instanceId) =>
             doStaticNewMemberJoinGroup(
               group,
@@ -530,15 +535,17 @@ private[group] class GroupCoordinator(
     }
   }
 
-  def handleSyncGroup(groupId: String,
-                      generation: Int,
-                      memberId: String,
-                      protocolType: Option[String],
-                      protocolName: Option[String],
-                      groupInstanceId: Option[String],
-                      groupAssignment: Map[String, Array[Byte]],
+  def handleSyncGroup(groupId: String,          //groupId
+                      generation: Int,          //序号，当前coordinator负责的消费者组已经发生rebalance的次数
+                      memberId: String,          //成员id
+                      protocolType: Option[String], //协议类型，目前只有consumer
+                      protocolName: Option[String], //分区分配策略
+                      groupInstanceId: Option[String],    //consumer静态id
+                      groupAssignment: Map[String, Array[Byte]],  //group分配方案
                       responseCallback: SyncCallback,
                       requestLocal: RequestLocal = RequestLocal.NoCaching): Unit = {
+
+    //1.1 检查group状态
     validateGroupStatus(groupId, ApiKeys.SYNC_GROUP) match {
       case Some(error) if error == Errors.COORDINATOR_LOAD_IN_PROGRESS =>
         // The coordinator is loading, which means we've lost the state of the active rebalance and the
@@ -550,8 +557,11 @@ private[group] class GroupCoordinator(
       case Some(error) => responseCallback(SyncGroupResult(error))
 
       case None =>
+        //1.2 获取group
         groupManager.getGroup(groupId) match {
           case None => responseCallback(SyncGroupResult(Errors.UNKNOWN_MEMBER_ID))
+
+          //1.3 如果group存在当前coordinator中，调用doSyncGroup
           case Some(group) => doSyncGroup(group, generation, memberId, protocolType, protocolName,
             groupInstanceId, groupAssignment, requestLocal, responseCallback)
         }
@@ -611,6 +621,7 @@ private[group] class GroupCoordinator(
         groupInstanceId
       )
 
+      //1.1 只处理CompletingRebalance和Stable两种情况，其他情况返回
       validationErrorOpt match {
         case Some(error) => responseCallback(SyncGroupResult(error))
 
@@ -621,15 +632,21 @@ private[group] class GroupCoordinator(
           case PreparingRebalance =>
             responseCallback(SyncGroupResult(Errors.REBALANCE_IN_PROGRESS))
 
+          //2.1 CompletingRebalance情况时
           case CompletingRebalance =>
+
+            //2.2 配置callback函数
             group.get(memberId).awaitingSyncCallback = responseCallback
+            //2.3 将member从group中删除
             removePendingSyncMember(group, memberId)
 
+            //2.4 检查是否为leader
             // if this is the leader, then we can attempt to persist state and transition to stable
             if (group.isLeader(memberId)) {
               info(s"Assignment received from leader $memberId for group ${group.groupId} for generation ${group.generationId}. " +
                 s"The group has ${group.size} members, ${group.allStaticMembers.size} of which are static.")
 
+              //2.5 检查leader的assignment是否为空
               // fill any missing members with an empty assignment
               val missing = group.allMembers.diff(groupAssignment.keySet)
               val assignment = groupAssignment ++ missing.map(_ -> Array.empty[Byte]).toMap
@@ -638,16 +655,19 @@ private[group] class GroupCoordinator(
                 warn(s"Setting empty assignments for members $missing of ${group.groupId} for generation ${group.generationId}")
               }
 
+              //2.6 将消费者组信息保存到GroupMetadataManager，并写入
               groupManager.storeGroup(group, assignment, (error: Errors) => {
                 group.inLock {
                   // another member may have joined the group while we were awaiting this callback,
                   // so we must ensure we are still in the CompletingRebalance state and the same generation
                   // when it gets invoked. if we have transitioned to another state, then do nothing
                   if (group.is(CompletingRebalance) && generationId == group.generationId) {
+                    //2.7 如果报错，则重置分配方案并发送错误给所有成员，并准备下一次rebalance
                     if (error != Errors.NONE) {
                       resetAndPropagateAssignmentError(group, error)
                       maybePrepareRebalance(group, s"Error $error when storing group assignment during SyncGroup (member: $memberId)")
                     } else {
+                      //2.8 如果没有报错，则设置分配方案并发送给所有成员
                       setAndPropagateAssignment(group, assignment)
                       group.transitionTo(Stable)
                     }
@@ -657,6 +677,7 @@ private[group] class GroupCoordinator(
               groupCompletedRebalanceSensor.record()
             }
 
+            //3.1 stable状态，直接响应并重置heartbeat
           case Stable =>
             removePendingSyncMember(group, memberId)
 
@@ -1344,6 +1365,8 @@ private[group] class GroupCoordinator(
                                     group: GroupMetadata,
                                     callback: JoinCallback,
                                     reason: String): Unit = {
+
+    //1.1 构建member对象
     val member = new MemberMetadata(memberId, groupInstanceId, clientId, clientHost,
       rebalanceTimeoutMs, sessionTimeoutMs, protocolType, protocols)
 
@@ -1353,8 +1376,10 @@ private[group] class GroupCoordinator(
     if (group.is(PreparingRebalance) && group.generationId == 0)
       group.newMemberAdded = true
 
+    //1.2 将member加入到group中
     group.add(member, callback)
 
+    //1.3 重置heartbeat超时
     // The session timeout does not affect new members since they do not have their memberId and
     // cannot send heartbeats. Furthermore, we cannot detect disconnects because sockets are muted
     // while the JoinGroup is in purgatory. If the client does disconnect (e.g. because of a request
@@ -1363,6 +1388,7 @@ private[group] class GroupCoordinator(
     // for new members. If the new member is still there, we expect it to retry.
     completeAndScheduleNextExpiration(group, member, NewMemberJoinTimeoutMs)
 
+    //1.4 触发rebalance
     maybePrepareRebalance(group, s"Adding new member $memberId with group instance id $groupInstanceId; client reason: $reason")
   }
 

@@ -663,16 +663,22 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
      * @throws InterruptException if the thread is interrupted while blocked
      */
     public void initTransactions() {
+        //1.1 检查前置条件：transactionManager和producer是否close
         throwIfNoTransactionManager();
         throwIfProducerClosed();
         long now = time.nanoseconds();
+
+        //1.2 调用TransactionManager的initializeTransactions方法
         TransactionalRequestResult result = transactionManager.initializeTransactions();
+
+        //1.3 唤醒sender线程，检查发送事务请求
         sender.wakeup();
         result.await(maxBlockTimeMs, TimeUnit.MILLISECONDS);
         producerMetrics.recordInit(time.nanoseconds() - now);
     }
 
     /**
+     * 开启一次事务
      * Should be called before the start of each new transaction. Note that prior to the first invocation
      * of this method, you must invoke {@link #initTransactions()} exactly one time.
      *
@@ -691,6 +697,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
         throwIfNoTransactionManager();
         throwIfProducerClosed();
         long now = time.nanoseconds();
+
+        //1.1 调用TransactionManager的beginTransaction方法，开启一次事务
         transactionManager.beginTransaction();
         producerMetrics.recordBeginTxn(time.nanoseconds() - now);
     }
@@ -833,7 +841,11 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
         throwIfNoTransactionManager();
         throwIfProducerClosed();
         long commitStart = time.nanoseconds();
+
+        //1.1 调用TransactionManager.beginCommit()方法
         TransactionalRequestResult result = transactionManager.beginCommit();
+
+        //1.2 唤醒sender线程发送事务请求
         sender.wakeup();
         result.await(maxBlockTimeMs, TimeUnit.MILLISECONDS);
         producerMetrics.recordCommitTxn(time.nanoseconds() - commitStart);
@@ -868,6 +880,8 @@ public class KafkaProducer<K, V> implements Producer<K, V> {
         throwIfProducerClosed();
         log.info("Aborting incomplete transaction");
         long abortStart = time.nanoseconds();
+
+        //1.1 调用TransactionManager.beginAbort()方法
         TransactionalRequestResult result = transactionManager.beginAbort();
         sender.wakeup();
         result.await(maxBlockTimeMs, TimeUnit.MILLISECONDS);

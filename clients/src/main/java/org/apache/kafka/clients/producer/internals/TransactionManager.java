@@ -94,7 +94,11 @@ public class TransactionManager {
 
     private final Logger log;
     private final String transactionalId;
+
+    //事务超时时间
     private final int transactionTimeoutMs;
+
+    //消息版本
     private final ApiVersions apiVersions;
 
     private final TxnPartitionMap txnPartitionMap;
@@ -110,12 +114,14 @@ public class TransactionManager {
     // The value of the map is the sequence number of the batch following the expired one, computed by adding its
     // record count to its sequence number. This is used to tell if a subsequent batch is the one immediately following
     // the expired one.
+    //用于追踪发送过期的batch
     private final Map<TopicPartition, Integer> partitionsWithUnresolvedSequences;
 
     // The partitions that have received an error that triggers an epoch bump. When the epoch is bumped, these
     // partitions will have the sequences of their in-flight batches rewritten
     private final Set<TopicPartition> partitionsToRewriteSequences;
 
+    //向broker transaction coordinator发送请求的优先级队列
     private final PriorityQueue<TxnRequestHandler> pendingRequests;
     private final Set<TopicPartition> newPartitionsInTransaction;
     private final Set<TopicPartition> pendingPartitionsInTransaction;
@@ -284,15 +290,20 @@ public class TransactionManager {
     synchronized TransactionalRequestResult initializeTransactions(ProducerIdAndEpoch producerIdAndEpoch) {
         maybeFailWithError();
 
+        //1.1 检查ProducerIdAndEpoch是否为空
         boolean isEpochBump = producerIdAndEpoch != ProducerIdAndEpoch.NONE;
+
+        //通过handleCachedTransactionRequestResult方法处理事务请求结果
         return handleCachedTransactionRequestResult(() -> {
             // If this is an epoch bump, we will transition the state as part of handling the EndTxnRequest
             if (!isEpochBump) {
+                //1.2 初始化事务状态为INITIALIZING
                 transitionTo(State.INITIALIZING);
                 log.info("Invoking InitProducerId for the first time in order to acquire a producer ID");
             } else {
                 log.info("Invoking InitProducerId with current producer ID and epoch {} in order to bump the epoch", producerIdAndEpoch);
             }
+            //1.3 向broker端发送InitProducerIdRequest请求
             InitProducerIdRequestData requestData = new InitProducerIdRequestData()
                     .setTransactionalId(transactionalId)
                     .setTransactionTimeoutMs(transactionTimeoutMs)
@@ -306,15 +317,20 @@ public class TransactionManager {
     }
 
     public synchronized void beginTransaction() {
+        // 确保transactionalId事务id不为空
         ensureTransactional();
         throwIfPendingState("beginTransaction");
         maybeFailWithError();
+
+        //状态置为IN_TRANSACTION
         transitionTo(State.IN_TRANSACTION);
     }
 
     public synchronized TransactionalRequestResult beginCommit() {
+        //使用handleCachedTransactionRequestResult方法处理结果
         return handleCachedTransactionRequestResult(() -> {
             maybeFailWithError();
+            // 将状态转换为COMMITTING_TRANSACTION
             transitionTo(State.COMMITTING_TRANSACTION);
             return beginCompletingTransaction(TransactionResult.COMMIT);
         }, State.COMMITTING_TRANSACTION, "commitTransaction");
@@ -333,13 +349,18 @@ public class TransactionManager {
     }
 
     private TransactionalRequestResult beginCompletingTransaction(TransactionResult transactionResult) {
+
+        //1.1 检查是否需要发送AddPartitionsToTxnRequest
         if (!newPartitionsInTransaction.isEmpty())
             enqueueRequest(addPartitionsToTransactionHandler());
 
         // If the error is an INVALID_PRODUCER_ID_MAPPING error, the server will not accept an EndTxnRequest, so skip
         // directly to InitProducerId. Otherwise, we must first abort the transaction, because the producer will be
         // fenced if we directly call InitProducerId.
+
+        //1.2 如果是INVALID_PRODUCER_ID_MAPPING，broker不会接受EndTxnRequest请求，直接转为初始化initializeTransactions
         if (!(lastError instanceof InvalidPidMappingException)) {
+            //1.3 向broker端发送EndTxnRequest请求
             EndTxnRequest.Builder builder = new EndTxnRequest.Builder(
                     new EndTxnRequestData()
                             .setTransactionalId(transactionalId)
@@ -363,11 +384,13 @@ public class TransactionManager {
         throwIfPendingState("sendOffsetsToTransaction");
         maybeFailWithError();
 
+        //检查是否为IN_TRANSACTION状态
         if (currentState != State.IN_TRANSACTION) {
             throw new IllegalStateException("Cannot send offsets if a transaction is not in progress " +
                 "(currentState= " + currentState + ")");
         }
 
+        //发送AddOffsetsToTxnRequest到broker端
         log.debug("Begin adding offsets {} for consumer group {} to transaction", offsets, groupMetadata);
         AddOffsetsToTxnRequest.Builder builder = new AddOffsetsToTxnRequest.Builder(
             new AddOffsetsToTxnRequestData()
@@ -1016,6 +1039,7 @@ public class TransactionManager {
     }
 
     private void ensureTransactional() {
+        // 检查transactionalId是否为空
         if (!isTransactional())
             throw new IllegalStateException("Transactional method invoked on a non-transactional producer.");
     }
@@ -1129,20 +1153,28 @@ public class TransactionManager {
         State nextState,
         String operation
     ) {
+        //1.1 确保处于事务状态
         ensureTransactional();
 
+        //1.2 检查是否存在未完成的事务
         if (pendingTransition != null) {
+
+            //1.3 如果pending的事务已经ack，则清空
             if (pendingTransition.result.isAcked()) {
                 pendingTransition = null;
             } else if (nextState != pendingTransition.state) {
+
+                //1.4 如果存在pending事务，并且未被确认的nextState状态与pending状态不一致，则抛出异常
                 throw new IllegalStateException("Cannot attempt operation `" + operation + "` "
                     + "because the previous call to `" + pendingTransition.operation + "` "
                     + "timed out and must be retried");
             } else {
+                //1.5 如果目标状态匹配，返回result
                 return pendingTransition.result;
             }
         }
 
+        //2.1 如果没有未完成的事务，调用transactionalRequestResultSupplier处理，并设置为pending
         TransactionalRequestResult result = transactionalRequestResultSupplier.get();
         pendingTransition = new PendingStateTransition(result, nextState, operation);
         return result;
@@ -1307,6 +1339,7 @@ public class TransactionManager {
             InitProducerIdResponse initProducerIdResponse = (InitProducerIdResponse) response;
             Errors error = initProducerIdResponse.error();
 
+            //1.1 如果请求成功，读取ProducerIdAndEpoch，并设置事务状态为READY
             if (error == Errors.NONE) {
                 ProducerIdAndEpoch producerIdAndEpoch = new ProducerIdAndEpoch(initProducerIdResponse.data().producerId(),
                         initProducerIdResponse.data().producerEpoch());
@@ -1318,12 +1351,15 @@ public class TransactionManager {
                 }
                 result.done();
             } else if (error == Errors.NOT_COORDINATOR || error == Errors.COORDINATOR_NOT_AVAILABLE) {
+                //1.2 如果响应中的错误是NOT_COORDINATOR或COORDINATOR_NOT_AVAILABLE，则发送FindCoordinatorRequest后重新发送InitProducerIdRequest
                 lookupCoordinator(FindCoordinatorRequest.CoordinatorType.TRANSACTION, transactionalId);
                 reenqueue();
             } else if (error.exception() instanceof RetriableException) {
+                //1.3 如果响应中的错误是RetriableException，则重新发送InitProducerIdRequest
                 reenqueue();
             } else if (error == Errors.TRANSACTIONAL_ID_AUTHORIZATION_FAILED ||
                     error == Errors.CLUSTER_AUTHORIZATION_FAILED) {
+                //1.4 其它类型的错误，抛出异常
                 log.info("Abortable authorization error: {}.  Transition the producer state to {}", error.message(), State.ABORTABLE_ERROR);
                 lastError = error.exception();
                 abortableError(error.exception());
@@ -1550,6 +1586,7 @@ public class TransactionManager {
             Errors error = endTxnResponse.error();
 
             if (error == Errors.NONE) {
+                //1.1 请求成功，则重置事务状态
                 completeTransaction();
                 result.done();
             } else if (error == Errors.COORDINATOR_NOT_AVAILABLE || error == Errors.NOT_COORDINATOR) {
@@ -1604,8 +1641,10 @@ public class TransactionManager {
             Errors error = Errors.forCode(addOffsetsToTxnResponse.data().errorCode());
 
             if (error == Errors.NONE) {
+                //1.1 请求成功的情况
                 log.debug("Successfully added partition for consumer group {} to transaction", builder.data.groupId());
 
+                //1.2 成功后会发送TxnOffsetCommitRequest
                 // note the result is not completed until the TxnOffsetCommit returns
                 pendingRequests.add(txnOffsetCommitHandler(result, offsets, groupMetadata));
 
